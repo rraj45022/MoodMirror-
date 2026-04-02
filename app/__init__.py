@@ -1,0 +1,1 @@
+"""Mood Mirror application package."""
