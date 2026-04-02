@@ -650,7 +650,7 @@ class MoodMirrorWindow(QMainWindow):
                 self.details_label.setText("The current feed looks inactive, so Mood Mirror switched to another webcam source.")
                 self.camera.set_status("Switching camera source because the current feed looks inactive.")
                 return
-        self.tracker.update(result.emotion, result.confidence)
+        self.tracker.update(result.emotion, result.confidence, result.metrics, result.scores)
         self.camera.set_frame(frame, result)
         self.timeline.set_history(list(self.tracker.history))
         self._apply_theme(result.emotion)

@@ -40,23 +40,50 @@ class SessionTracker:
         self.last_confidence = 0.0
         self.last_smile_at = 0.0
         self.last_surprise_at = 0.0
+        self.smile_active = False
+        self.surprise_active = False
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode
 
-    def update(self, emotion: str, confidence: float) -> None:
+    def update(
+        self,
+        emotion: str,
+        confidence: float,
+        metrics: dict[str, float] | None = None,
+        scores: dict[str, float] | None = None,
+    ) -> None:
         now = time.time()
+        metrics = metrics or {}
+        scores = scores or {}
         self.total_samples += 1
         self.history.append((emotion, confidence))
         self.calm_score_total += EMOTION_PRIORITY.get(emotion, 0.5) * (1.0 - min(confidence, 1.0) * 0.18)
 
-        if emotion == "happy" and confidence >= 0.58 and now - self.last_smile_at > 1.35:
+        smile_signal = max(
+            scores.get("happy", 0.0),
+            metrics.get("smile_curve", 0.0) * 5.6 + max(metrics.get("mouth_width", 0.0) - 0.34, 0.0) * 2.0,
+        )
+        surprise_signal = max(
+            scores.get("surprise", 0.0),
+            max(metrics.get("mouth_open", 0.0) - 0.028, 0.0) * 7.0
+            + max(metrics.get("eye_open", 0.0) - 0.31, 0.0) * 2.4
+            + max(metrics.get("brow_raise", 0.0) - 0.05, 0.0) * 14.0,
+        )
+
+        if smile_signal >= 0.54 and not self.smile_active and now - self.last_smile_at > 1.0:
             self.smile_events += 1
             self.last_smile_at = now
+            self.smile_active = True
+        elif smile_signal <= 0.34:
+            self.smile_active = False
 
-        if emotion == "surprise" and confidence >= 0.56 and now - self.last_surprise_at > 1.7:
+        if surprise_signal >= 0.52 and not self.surprise_active and now - self.last_surprise_at > 1.2:
             self.surprise_events += 1
             self.last_surprise_at = now
+            self.surprise_active = True
+        elif surprise_signal <= 0.3:
+            self.surprise_active = False
 
         delta = confidence - self.last_confidence
         if delta > 0.2 and confidence >= 0.68:
