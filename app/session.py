@@ -138,3 +138,24 @@ class SessionTracker:
             return "neutral"
         counts = Counter(emotion for emotion, _ in self.history)
         return counts.most_common(1)[0][0]
+
+    def recent_expression_summary(self, sample_size: int = 45) -> str:
+        recent = list(self.history)[-sample_size:]
+        if not recent:
+            return "No recent expression data yet."
+
+        counts = Counter(emotion for emotion, _ in recent)
+        dominant, dominant_count = counts.most_common(1)[0]
+        average_confidence = sum(confidence for _, confidence in recent) / len(recent)
+        dominant_share = int((dominant_count / len(recent)) * 100)
+        return (
+            f"Recent dominant expression: {dominant} for about {dominant_share}% of frames, "
+            f"average confidence {int(average_confidence * 100)}%, calmness {self.calmness_percent()}%, "
+            f"smiles {self.smile_events}, surprise moments {self.surprise_events}."
+        )
+
+    def live_signal_label(self) -> str:
+        return (
+            f"{self.last_emotion.title()} at {int(self.last_confidence * 100)}% confidence | "
+            f"calmness {self.calmness_percent()}% | smiles {self.smile_events} | surprises {self.surprise_events}"
+        )

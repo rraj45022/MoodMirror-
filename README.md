@@ -4,6 +4,10 @@ Mood Mirror is a Python desktop application that uses a live webcam feed to esti
 
 The project is designed as a demo-friendly, visually reactive experience rather than a clinical emotion analysis tool. It combines webcam capture, face detection, optional facial landmarks, lightweight expression heuristics, and a theme-driven PySide6 interface to create a responsive "emotion mirror" for demos, experiments, and creative tooling.
 
+It now also includes a voice-driven AI interview panel in Interview Mode. You can start a mock interview, speak your answers out loud, let Groq transcribe them, and monitor live expression signals alongside the transcript.
+
+For a detailed architecture and runtime walkthrough, see [WORKFLOW.md](/Users/rahulraj/python/interview_face_recognition/WORKFLOW.md).
+
 ## What It Does
 
 Mood Mirror watches the active webcam stream, finds a face, estimates expression cues such as mouth openness, smile curvature, eyebrow movement, and eye openness, then maps those cues into a mood category.
@@ -35,6 +39,10 @@ Interview Mode focuses on session-style behavioral signals rather than pure them
 - `Smile Rate`: estimated from facial smile signals over time
 - `Surprise Moments`: counted from surprise-related face signals with hysteresis to avoid duplicate counts every frame
 - Session timer and rolling mood timeline for quick review
+- `Start` and `End` controls for the live interview loop
+- Automatic microphone listening after each interviewer prompt
+- Groq-backed speech transcription and follow-up generation from your spoken answer
+- Automatic transcript and macOS voice playback for interviewer prompts via the built-in `say` command
 
 This mode is meant for mock interviews, presentation practice, and self-review demos.
 
@@ -54,6 +62,7 @@ Streamer Mode turns expression spikes into presentation-style overlays.
 - Optional 68-point facial landmark tracking using OpenCV Facemark LBF
 - Fallback feature tracking when landmarks are not available
 - Emotion score estimation from facial geometry and simple heuristics
+- Voice-driven AI interviewer panel with Groq chat completions and speech transcription support
 - Mood-driven animated UI themes built in PySide6
 - Camera source switching on macOS with AVFoundation-backed enumeration
 - Auto-download of the open-source LBF landmark model on first run
@@ -122,6 +131,16 @@ If you already know which Python interpreter you want to use, you can also insta
 python main.py
 ```
 
+Before starting the AI interview panel, add your Groq key to `.env` in the repository root.
+
+```bash
+GROQ_API_KEY=your_groq_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+```
+
+If `.env` is missing or the key is empty, the interview panel can still show fallback prompts, but the automatic microphone-to-transcript loop will stay disabled.
+
 Or, using the interpreter path that has been used in this workspace:
 
 ```bash
@@ -141,6 +160,7 @@ On the first run, Mood Mirror attempts to download the open-source OpenCV LBF la
 
 - Camera enumeration uses AVFoundation when available.
 - You may need to grant camera access to Terminal or VS Code in System Settings.
+- You may also need to grant microphone access for the live interview listener.
 - If you have multiple camera sources, the app can switch between them from the UI.
 
 ### Virtual Environments
@@ -164,6 +184,12 @@ The repository intentionally ignores `.venv/`, `__pycache__/`, and generated mod
 
 Interview metrics now use direct facial signals, not only the dominant mood label. Smile rate and surprise moments should update when expression thresholds are crossed, but they still depend on lighting, camera angle, and how clearly the face is visible.
 
+### The AI interviewer is not hearing my answer
+
+- Confirm microphone permission for VS Code or Terminal in macOS Settings.
+- Make sure `.env` contains a valid Groq key.
+- The app waits for a short pause before sending the captured answer for transcription, so pause briefly after each answer.
+
 ## Dependencies
 
 Main libraries used in this project:
@@ -179,6 +205,7 @@ Main libraries used in this project:
 - Demo project for emotion-reactive UI concepts
 - Webcam-based visual interaction experiments
 - Mock interview feedback prototype
+- Voice-based mock interview practice with a live interviewer transcript and spoken prompts
 - Streamer overlay concept demo
 - Desktop computer vision portfolio project
 

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import html
 from pathlib import Path
 import math
 import random
 import sys
 
 import cv2
-from PySide6.QtCore import QTimer, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
+import requests
+from PySide6.QtCore import QObject, QThread, QTimer, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -18,11 +20,14 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from .interview import AudioChunkRecorder, GroqInterviewService, InterviewMessage, PromptSpeaker
 from .session import SessionTracker
 from .vision import EmotionResult, FaceAnalyzer
 
@@ -127,11 +132,17 @@ class TimelineWidget(QWidget):
 class CameraWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.setMinimumSize(840, 520)
+        self.setMinimumSize(560, 360)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.frame: QImage | None = None
         self.frame_size = (1, 1)
         self.result = EmotionResult()
+        self.display_mode = "mirror"
+
+    def set_display_mode(self, mode: str) -> None:
+        self.display_mode = mode
+        self.setMinimumSize(560, 360)
+        self.update()
 
     def set_status(self, message: str) -> None:
         self.frame = None
@@ -199,7 +210,7 @@ class CameraWidget(QWidget):
             return
 
         frame_width, frame_height = self.frame_size
-        scale = max(viewport.width() / frame_width, viewport.height() / frame_height)
+        scale = min(viewport.width() / frame_width, viewport.height() / frame_height) * 0.97
         draw_width = frame_width * scale
         draw_height = frame_height * scale
         draw_x = viewport.center().x() - (draw_width / 2)
@@ -384,18 +395,97 @@ class StageWidget(QWidget):
             self.particles.append(particle)
 
 
+class InterviewRequestWorker(QObject):
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        service: GroqInterviewService,
+        conversation: list[InterviewMessage],
+        expression_summary: str,
+        stage: str,
+    ) -> None:
+        super().__init__()
+        self.service = service
+        self.conversation = conversation
+        self.expression_summary = expression_summary
+        self.stage = stage
+
+    def run(self) -> None:
+        try:
+            prompt = self.service.generate_turn(
+                conversation=self.conversation,
+                expression_summary=self.expression_summary,
+                stage=self.stage,
+            )
+        except requests.RequestException as exc:
+            self.failed.emit(f"Groq request failed: {exc}")
+            return
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+
+        self.finished.emit(prompt)
+
+
+class TranscriptionWorker(QObject):
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, service: GroqInterviewService, wav_bytes: bytes) -> None:
+        super().__init__()
+        self.service = service
+        self.wav_bytes = wav_bytes
+
+    def run(self) -> None:
+        try:
+            transcript = self.service.transcribe_audio(self.wav_bytes)
+        except requests.RequestException as exc:
+            self.failed.emit(f"Groq transcription failed: {exc}")
+            return
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+
+        self.finished.emit(transcript)
+
+
 class MoodMirrorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Mood Mirror")
         self.resize(1500, 940)
+        self.setMinimumSize(1120, 760)
 
-        self.analyzer = FaceAnalyzer(Path(__file__).resolve().parent.parent / "models")
+        self.project_dir = Path(__file__).resolve().parent.parent
+        self.analyzer = FaceAnalyzer(self.project_dir / "models")
         self.tracker = SessionTracker()
+        self.interview_service = GroqInterviewService(self.project_dir)
+        self.prompt_speaker = PromptSpeaker()
+        self.audio_recorder = AudioChunkRecorder()
         self.camera_sources = self._probe_camera_sources()
         self.capture: cv2.VideoCapture | None = None
         self.active_camera_pos = -1
         self.no_face_frames = 0
+        self.interview_active = False
+        self.interview_pending = False
+        self.transcription_pending = False
+        self.interview_messages: list[InterviewMessage] = []
+        self.audio_queue: list[bytes] = []
+        self.interview_request_id = 0
+        self.transcription_request_id = 0
+        self.worker_thread: QThread | None = None
+        self.worker_object: QObject | None = None
+
+        self.speaker_poll_timer = QTimer(self)
+        self.speaker_poll_timer.setInterval(250)
+        self.speaker_poll_timer.timeout.connect(self._check_prompt_speaker)
+
+        self.audio_recorder.utterance_ready.connect(self._handle_audio_utterance)
+        self.audio_recorder.status_changed.connect(self._update_listening_status)
+        self.audio_recorder.level_changed.connect(self._update_mic_level)
+        self.audio_recorder.error.connect(self._handle_audio_error)
 
         self.stage = StageWidget()
         self.setCentralWidget(self.stage)
@@ -444,16 +534,28 @@ class MoodMirrorWindow(QMainWindow):
         header.addWidget(reset_button)
         root.addLayout(header)
 
-        body = QHBoxLayout()
-        body.setSpacing(18)
-        root.addLayout(body, 1)
+        self.body_layout = QHBoxLayout()
+        self.body_layout.setSpacing(18)
+        root.addLayout(self.body_layout, 1)
 
         self.camera = CameraWidget()
-        body.addWidget(self.camera, 3)
+        self.body_layout.addWidget(self.camera, 5)
 
-        side = QVBoxLayout()
-        side.setSpacing(14)
-        body.addLayout(side, 2)
+        self.side_scroll = QScrollArea()
+        self.side_scroll.setObjectName("sideScroll")
+        self.side_scroll.setWidgetResizable(True)
+        self.side_scroll.setFrameShape(QFrame.NoFrame)
+        self.side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.side_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+
+        self.side_container = QWidget()
+        self.side_scroll.setWidget(self.side_container)
+
+        self.side_layout = QVBoxLayout(self.side_container)
+        self.side_layout.setSpacing(14)
+        self.side_layout.setContentsMargins(0, 0, 6, 0)
+        self.body_layout.addWidget(self.side_scroll, 4)
 
         mood_panel = QFrame()
         mood_panel.setObjectName("panel")
@@ -472,7 +574,72 @@ class MoodMirrorWindow(QMainWindow):
         mood_layout.addWidget(self.mood_label)
         mood_layout.addWidget(self.details_label)
         mood_layout.addWidget(self.source_label)
-        side.addWidget(mood_panel)
+        self.side_layout.addWidget(mood_panel)
+
+        self.interview_panel = QFrame()
+        self.interview_panel.setObjectName("interviewPanel")
+        interview_layout = QVBoxLayout(self.interview_panel)
+        interview_layout.setContentsMargins(22, 22, 22, 22)
+        interview_layout.setSpacing(14)
+
+        interview_title = QLabel("Live AI Interview")
+        interview_title.setObjectName("interviewTitle")
+        self.interview_status_label = QLabel(self.interview_service.configuration_status())
+        self.interview_status_label.setObjectName("interviewDetailLabel")
+        self.interview_intro_label = QLabel(
+            "Press Start once. The app will ask questions, listen to your spoken answer, transcribe it, and reply in both text and audio."
+        )
+        self.interview_intro_label.setObjectName("interviewDetailLabel")
+        self.interview_expression_label = QLabel("Expression read: waiting for a face")
+        self.interview_expression_label.setObjectName("interviewDetailLabel")
+        self.interview_expression_label.setWordWrap(True)
+
+        control_row = QHBoxLayout()
+        self.start_interview_button = QPushButton("Start")
+        self.start_interview_button.clicked.connect(self._start_interview)
+        self.stop_interview_button = QPushButton("End")
+        self.stop_interview_button.clicked.connect(self._stop_interview)
+        control_row.addWidget(self.start_interview_button)
+        control_row.addWidget(self.stop_interview_button)
+        control_row.addStretch(1)
+
+        live_row = QHBoxLayout()
+        self.listening_chip = QLabel("Microphone idle")
+        self.listening_chip.setObjectName("statusChip")
+        self.mic_level_label = QLabel("Mic level 0%")
+        self.mic_level_label.setObjectName("interviewMinorLabel")
+        live_row.addWidget(self.listening_chip)
+        live_row.addStretch(1)
+        live_row.addWidget(self.mic_level_label)
+
+        heard_title = QLabel("Latest Candidate Transcript")
+        heard_title.setObjectName("sectionTitle")
+        self.last_heard_label = QLabel("Waiting for your first spoken answer.")
+        self.last_heard_label.setObjectName("liveNote")
+        self.last_heard_label.setWordWrap(True)
+
+        self.interview_transcript = QTextEdit()
+        self.interview_transcript.setObjectName("transcriptBox")
+        self.interview_transcript.setReadOnly(True)
+        self.interview_transcript.setMinimumHeight(220)
+        self.interview_transcript.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.interview_transcript.setPlaceholderText("The live interview transcript will appear here.")
+
+        self.interview_reset_hint = QLabel("Reset Session in the top bar clears the emotion metrics without closing the app.")
+        self.interview_reset_hint.setObjectName("interviewMinorLabel")
+        self.interview_reset_hint.setWordWrap(True)
+
+        interview_layout.addWidget(interview_title)
+        interview_layout.addWidget(self.interview_status_label)
+        interview_layout.addWidget(self.interview_intro_label)
+        interview_layout.addLayout(control_row)
+        interview_layout.addLayout(live_row)
+        interview_layout.addWidget(self.interview_expression_label)
+        interview_layout.addWidget(heard_title)
+        interview_layout.addWidget(self.last_heard_label)
+        interview_layout.addWidget(self.interview_transcript)
+        interview_layout.addWidget(self.interview_reset_hint)
+        self.side_layout.addWidget(self.interview_panel, 3)
 
         cards_grid = QGridLayout()
         cards_grid.setSpacing(12)
@@ -484,11 +651,11 @@ class MoodMirrorWindow(QMainWindow):
         cards_grid.addWidget(self.card_secondary, 0, 1)
         cards_grid.addWidget(self.card_third, 1, 0)
         cards_grid.addWidget(self.card_fourth, 1, 1)
-        side.addLayout(cards_grid)
+        self.side_layout.addLayout(cards_grid)
 
-        confidence_panel = QFrame()
-        confidence_panel.setObjectName("panel")
-        confidence_layout = QVBoxLayout(confidence_panel)
+        self.confidence_panel = QFrame()
+        self.confidence_panel.setObjectName("panel")
+        confidence_layout = QVBoxLayout(self.confidence_panel)
         confidence_layout.setContentsMargins(20, 18, 20, 18)
         confidence_layout.setSpacing(12)
         confidence_title = QLabel("Emotion Confidence")
@@ -506,11 +673,11 @@ class MoodMirrorWindow(QMainWindow):
             row.addWidget(bar, 1)
             confidence_layout.addLayout(row)
             self.bars[emotion] = bar
-        side.addWidget(confidence_panel)
+        self.side_layout.addWidget(self.confidence_panel)
 
-        streamer_panel = QFrame()
-        streamer_panel.setObjectName("panel")
-        streamer_layout = QVBoxLayout(streamer_panel)
+        self.streamer_panel = QFrame()
+        self.streamer_panel.setObjectName("panel")
+        streamer_layout = QVBoxLayout(self.streamer_panel)
         streamer_layout.setContentsMargins(20, 18, 20, 18)
         streamer_layout.setSpacing(10)
         label = QLabel("Live Overlay")
@@ -520,11 +687,11 @@ class MoodMirrorWindow(QMainWindow):
         self.overlay_label.setWordWrap(True)
         streamer_layout.addWidget(label)
         streamer_layout.addWidget(self.overlay_label)
-        side.addWidget(streamer_panel)
+        self.side_layout.addWidget(self.streamer_panel)
 
-        timeline_panel = QFrame()
-        timeline_panel.setObjectName("panel")
-        timeline_layout = QVBoxLayout(timeline_panel)
+        self.timeline_panel = QFrame()
+        self.timeline_panel.setObjectName("panel")
+        timeline_layout = QVBoxLayout(self.timeline_panel)
         timeline_layout.setContentsMargins(20, 18, 20, 18)
         timeline_layout.setSpacing(10)
         timeline_label = QLabel("Mood Timeline")
@@ -532,19 +699,26 @@ class MoodMirrorWindow(QMainWindow):
         self.timeline = TimelineWidget()
         timeline_layout.addWidget(timeline_label)
         timeline_layout.addWidget(self.timeline)
-        root.addWidget(timeline_panel)
+        self.side_layout.addWidget(self.timeline_panel)
+        self.side_layout.addStretch(1)
 
         self._set_mode("mirror")
 
     def _set_mode(self, mode: str) -> None:
+        if self.tracker.mode == "interview" and mode != "interview" and self.interview_active:
+            self._stop_interview()
         self.tracker.set_mode(mode)
         for key, button in self.mode_buttons.items():
             button.setChecked(key == mode)
         self._update_cards()
+        self._refresh_interview_controls()
 
     def _reset_session(self) -> None:
         self.tracker.reset()
         self._update_cards()
+        self.interview_expression_label.setText("Expression read: waiting for fresh tracking data")
+        if self.tracker.mode == "interview":
+            self.interview_status_label.setText("Facial metrics reset. The interview loop stays available.")
 
     def _probe_camera_sources(self) -> list[CameraSource]:
         candidate_indices = self._candidate_camera_indices()
@@ -659,6 +833,8 @@ class MoodMirrorWindow(QMainWindow):
     def _apply_theme(self, emotion: str) -> None:
         theme = THEMES.get(emotion, THEMES["neutral"])
         self.stage.set_theme(emotion)
+        panel_label_color = "rgba(15, 24, 34, 0.82)" if emotion in {"happy", "surprise"} else "rgba(255, 255, 255, 0.92)"
+        panel_muted_color = "rgba(15, 24, 34, 0.68)" if emotion in {"happy", "surprise"} else "rgba(255, 255, 255, 0.76)"
         self.setStyleSheet(
             f"""
             QWidget {{
@@ -679,6 +855,11 @@ class MoodMirrorWindow(QMainWindow):
                 border: 1px solid rgba(255, 255, 255, 0.12);
                 border-radius: 24px;
             }}
+            QFrame#interviewPanel {{
+                background: rgba(6, 10, 18, 0.74);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 28px;
+            }}
             QLabel#statusChip {{
                 background: rgba(0, 0, 0, 0.16);
                 border-radius: 14px;
@@ -691,14 +872,34 @@ class MoodMirrorWindow(QMainWindow):
                 font-size: 34px;
                 font-weight: 800;
             }}
+            QLabel#interviewTitle {{
+                font-size: 28px;
+                font-weight: 800;
+                color: rgba(244, 248, 255, 0.98);
+            }}
             QLabel#detailsLabel, QLabel#overlayText {{
                 font-size: 15px;
-                color: rgba(255, 255, 255, 0.92);
+                color: {panel_label_color};
+            }}
+            QLabel#interviewDetailLabel {{
+                font-size: 15px;
+                color: rgba(244, 248, 255, 0.92);
+            }}
+            QLabel#interviewMinorLabel {{
+                font-size: 13px;
+                color: rgba(214, 224, 238, 0.74);
+            }}
+            QLabel#liveNote {{
+                background: rgba(255, 255, 255, 0.08);
+                border-radius: 16px;
+                padding: 12px 14px;
+                font-size: 15px;
+                color: rgba(245, 248, 255, 0.96);
             }}
             QLabel#sectionTitle, QLabel#metricTitle {{
                 font-size: 13px;
                 font-weight: 700;
-                color: rgba(255, 255, 255, 0.76);
+                color: {panel_muted_color};
                 letter-spacing: 0.06em;
                 text-transform: uppercase;
             }}
@@ -730,6 +931,37 @@ class MoodMirrorWindow(QMainWindow):
                 border-radius: 9px;
                 background: {theme.accent};
             }}
+            QTextEdit {{
+                background: rgba(7, 10, 16, 0.24);
+                border: 1px solid rgba(255, 255, 255, 0.14);
+                border-radius: 16px;
+                padding: 10px 12px;
+                selection-background-color: {theme.accent};
+            }}
+            QTextEdit#transcriptBox {{
+                background: rgba(2, 6, 12, 0.58);
+                color: rgba(246, 249, 255, 0.97);
+            }}
+            QScrollArea#sideScroll {{
+                background: transparent;
+            }}
+            QScrollArea#sideScroll > QWidget > QWidget {{
+                background: transparent;
+            }}
+            QScrollBar:vertical {{
+                background: rgba(0, 0, 0, 0.14);
+                width: 12px;
+                margin: 4px 0 4px 0;
+                border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba(255, 255, 255, 0.28);
+                min-height: 40px;
+                border-radius: 6px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
             """
         )
 
@@ -737,11 +969,13 @@ class MoodMirrorWindow(QMainWindow):
         self.status_chip.setText(result.status)
         self.mood_label.setText(result.emotion.title())
         if self.tracker.mode == "interview":
-            self.details_label.setText("Interview mode tracks calmness, smile rate, and surprise moments through the session.")
+            self.details_label.setText("Interview mode keeps the camera and live expression metrics visible while the AI interviewer listens and replies on the right.")
         elif self.tracker.mode == "streamer":
             self.details_label.setText("Streamer mode turns confidence spikes into live callouts and hype metrics.")
         else:
             self.details_label.setText("Mood Mirror maps your expression straight into the full scene theme in real time.")
+
+        self.interview_expression_label.setText(f"Expression read: {self.tracker.live_signal_label()}")
 
         for emotion, bar in self.bars.items():
             bar.setValue(int(result.scores.get(emotion, 0.0) * 100))
@@ -754,6 +988,222 @@ class MoodMirrorWindow(QMainWindow):
             self.overlay_label.setText(f"Session trend: {dominant}")
 
         self._update_cards()
+
+    def _refresh_interview_controls(self) -> None:
+        interview_mode = self.tracker.mode == "interview"
+        self.interview_panel.setVisible(interview_mode)
+        self.streamer_panel.setVisible(self.tracker.mode == "streamer")
+        busy = self.interview_pending or self.transcription_pending
+        self.start_interview_button.setEnabled(interview_mode and not self.interview_active and not busy)
+        self.stop_interview_button.setEnabled(interview_mode and self.interview_active)
+        self.confidence_panel.setVisible(self.tracker.mode != "streamer")
+        self.timeline_panel.setVisible(True)
+        self.camera.set_display_mode("mirror")
+        self.body_layout.setStretch(0, 5)
+        self.body_layout.setStretch(1, 4)
+
+    def _start_interview(self) -> None:
+        self.prompt_speaker.stop()
+        self.speaker_poll_timer.stop()
+        self.audio_recorder.stop()
+        self.audio_queue = []
+        self.interview_messages = []
+        self.interview_active = True
+        self.interview_pending = False
+        self.transcription_pending = False
+        self.interview_transcript.clear()
+        self.last_heard_label.setText("Waiting for your first spoken answer.")
+        self.listening_chip.setText("Preparing interview")
+        self.interview_status_label.setText("Starting the interviewer...")
+        self._append_interview_entry("System", "Interview started. The AI interviewer will ask questions, then the microphone will listen automatically.")
+        self._append_interview_entry("Interviewer", "Joining the interview...")
+        self._queue_interview_request(stage="start")
+
+    def _stop_interview(self) -> None:
+        self.prompt_speaker.stop()
+        self.speaker_poll_timer.stop()
+        self.audio_recorder.stop()
+        self.interview_active = False
+        self.interview_pending = False
+        self.transcription_pending = False
+        self.audio_queue = []
+        self.listening_chip.setText("Microphone idle")
+        self.mic_level_label.setText("Mic level 0%")
+        self.interview_status_label.setText("Interview session ended. Press Start to begin a fresh voice-driven round.")
+        self._refresh_interview_controls()
+
+    def _handle_audio_utterance(self, wav_bytes: bytes) -> None:
+        if not self.interview_active:
+            return
+        self.audio_queue.append(wav_bytes)
+        self.audio_recorder.pause("Processing your answer...", discard_current=True)
+        self._start_next_transcription()
+
+    def _start_next_transcription(self) -> None:
+        if not self.interview_active or self.transcription_pending or self.interview_pending or not self.audio_queue:
+            return
+
+        self.transcription_pending = True
+        self.transcription_request_id += 1
+        request_id = self.transcription_request_id
+        wav_bytes = self.audio_queue.pop(0)
+        self.interview_status_label.setText("Transcribing your answer...")
+        self.listening_chip.setText("Transcribing")
+        self._refresh_interview_controls()
+
+        worker = TranscriptionWorker(self.interview_service, wav_bytes)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_transcription_finished)
+        worker.failed.connect(self._on_transcription_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self._clear_worker_refs)
+        thread.finished.connect(thread.deleteLater)
+        self.worker_object = worker
+        self.worker_thread = thread
+        thread.start()
+
+    def _queue_interview_request(self, stage: str) -> None:
+        if not self.interview_active or self.interview_pending:
+            return
+
+        self.interview_pending = True
+        self.interview_request_id += 1
+        request_id = self.interview_request_id
+        self.interview_status_label.setText("Interviewer is preparing the next question...")
+        self.listening_chip.setText("Thinking")
+        self._refresh_interview_controls()
+
+        worker = InterviewRequestWorker(
+            service=self.interview_service,
+            conversation=list(self.interview_messages),
+            expression_summary=self.tracker.recent_expression_summary(),
+            stage=stage,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_interview_finished)
+        worker.failed.connect(self._on_interview_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self._clear_worker_refs)
+        thread.finished.connect(thread.deleteLater)
+        self.worker_object = worker
+        self.worker_thread = thread
+        thread.start()
+
+    def _handle_transcription_success(self, request_id: int, text: str) -> None:
+        if request_id != self.transcription_request_id or not self.interview_active:
+            return
+
+        self.transcription_pending = False
+        if not text.strip():
+            self.interview_status_label.setText("I did not catch a clear answer. Speak again and I will keep listening.")
+            self.last_heard_label.setText("No clear speech was captured in the last turn.")
+            self._refresh_interview_controls()
+            self._resume_audio_listener()
+            return
+
+        self.last_heard_label.setText(text)
+        self.interview_messages.append(InterviewMessage(role="user", content=text))
+        self._append_interview_entry("You", text)
+        self._queue_interview_request(stage="reply")
+
+    def _handle_transcription_failure(self, request_id: int, message: str) -> None:
+        if request_id != self.transcription_request_id:
+            return
+
+        self.transcription_pending = False
+        self.interview_status_label.setText(message)
+        self._refresh_interview_controls()
+        self._resume_audio_listener()
+
+    def _handle_interview_success(self, request_id: int, text: str) -> None:
+        if request_id != self.interview_request_id or not self.interview_active:
+            return
+
+        self.interview_pending = False
+        transcript_html = self.interview_transcript.toHtml()
+        if "Joining the interview..." in transcript_html:
+            self.interview_transcript.clear()
+            for item in self.interview_messages:
+                speaker = "You" if item.role == "user" else "Interviewer"
+                self._append_interview_entry(speaker, item.content)
+        self.interview_messages.append(InterviewMessage(role="assistant", content=text))
+        self._append_interview_entry("Interviewer", text)
+        self.interview_status_label.setText(self.interview_service.configuration_status())
+        self._refresh_interview_controls()
+        self.listening_chip.setText("Speaking")
+        if self.prompt_speaker.speak(text):
+            self.speaker_poll_timer.start()
+        else:
+            self._resume_audio_listener()
+
+    def _handle_interview_failure(self, request_id: int, message: str) -> None:
+        if request_id != self.interview_request_id:
+            return
+
+        self.interview_pending = False
+        self.interview_status_label.setText(message)
+        self._refresh_interview_controls()
+        self._resume_audio_listener()
+
+    def _resume_audio_listener(self) -> None:
+        if not self.interview_active or self.interview_pending or self.transcription_pending or self.prompt_speaker.is_speaking():
+            return
+
+        if not self.interview_service.api_key:
+            self.listening_chip.setText("Mic disabled")
+            self.interview_status_label.setText("Groq speech transcription needs a key in .env before live listening can start.")
+            return
+
+        self.audio_recorder.start()
+        self._refresh_interview_controls()
+
+    def _check_prompt_speaker(self) -> None:
+        if self.prompt_speaker.is_speaking():
+            return
+        self.speaker_poll_timer.stop()
+        self._resume_audio_listener()
+
+    def _update_listening_status(self, status: str) -> None:
+        self.listening_chip.setText(status)
+
+    def _update_mic_level(self, level: int) -> None:
+        self.mic_level_label.setText(f"Mic level {level}%")
+
+    def _handle_audio_error(self, message: str) -> None:
+        self.listening_chip.setText("Microphone error")
+        self.interview_status_label.setText(message)
+        self._refresh_interview_controls()
+
+    def _append_interview_entry(self, speaker: str, text: str) -> None:
+        safe_text = html.escape(text).replace("\n", "<br>")
+        self.interview_transcript.append(f"<b>{html.escape(speaker)}:</b> {safe_text}")
+        self.interview_transcript.moveCursor(QTextCursor.End)
+
+    def _on_transcription_finished(self, text: str) -> None:
+        self._handle_transcription_success(self.transcription_request_id, text)
+
+    def _on_transcription_failed(self, message: str) -> None:
+        self._handle_transcription_failure(self.transcription_request_id, message)
+
+    def _on_interview_finished(self, text: str) -> None:
+        self._handle_interview_success(self.interview_request_id, text)
+
+    def _on_interview_failed(self, message: str) -> None:
+        self._handle_interview_failure(self.interview_request_id, message)
+
+    def _clear_worker_refs(self) -> None:
+        self.worker_object = None
+        self.worker_thread = None
 
     def _update_cards(self) -> None:
         if self.tracker.mode == "interview":
@@ -777,6 +1227,13 @@ class MoodMirrorWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         self.frame_timer.stop()
         self.scene_timer.stop()
+        self.speaker_poll_timer.stop()
+        self.audio_recorder.stop()
+        self.prompt_speaker.stop()
+        self.interview_active = False
+        if self.worker_thread is not None and self.worker_thread.isRunning():
+            self.worker_thread.quit()
+            self.worker_thread.wait(5000)
         if self.capture is not None and self.capture.isOpened():
             self.capture.release()
         super().closeEvent(event)

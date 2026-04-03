@@ -1,7 +1,9 @@
 .venv/
+.env
 __pycache__/
 *.py[cod]
 
 models/
 
 .DS_Store
+WORKFLOW.md
