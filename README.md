@@ -6,7 +6,6 @@ The project is designed as a demo-friendly, visually reactive experience rather 
 
 It now also includes a voice-driven AI interview panel in Interview Mode. You can start a mock interview, speak your answers out loud, let Groq transcribe them, and monitor live expression signals alongside the transcript.
 
-For a detailed architecture and runtime walkthrough, see [WORKFLOW.md](/Users/rahulraj/python/interview_face_recognition/WORKFLOW.md).
 
 ## What It Does
 
