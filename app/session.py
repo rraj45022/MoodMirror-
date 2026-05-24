@@ -21,6 +21,30 @@ class StreamerOverlay:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class SessionSnapshot:
+    captured_at: float
+    calm_score_total: float
+    total_samples: int
+    smile_events: int
+    surprise_events: int
+    reaction_spikes: int
+    emotion_counts: Counter[str]
+
+
+@dataclass(frozen=True)
+class SessionSegmentSummary:
+    duration_seconds: int
+    calmness_percent: int
+    smile_events: int
+    surprise_events: int
+    reaction_spikes: int
+    smiles_per_minute: float
+    dominant_emotion: str
+    mood_mix: dict[str, int]
+    total_samples: int
+
+
 class SessionTracker:
     def __init__(self) -> None:
         self.mode = "mirror"
@@ -30,6 +54,7 @@ class SessionTracker:
         self.started_at = time.time()
         self.calm_score_total = 0.0
         self.total_samples = 0
+        self.emotion_counts: Counter[str] = Counter()
         self.smile_events = 0
         self.surprise_events = 0
         self.reaction_spikes = 0
@@ -57,6 +82,7 @@ class SessionTracker:
         metrics = metrics or {}
         scores = scores or {}
         self.total_samples += 1
+        self.emotion_counts[emotion] += 1
         self.history.append((emotion, confidence))
         self.calm_score_total += EMOTION_PRIORITY.get(emotion, 0.5) * (1.0 - min(confidence, 1.0) * 0.18)
 
@@ -158,4 +184,56 @@ class SessionTracker:
         return (
             f"{self.last_emotion.title()} at {int(self.last_confidence * 100)}% confidence | "
             f"calmness {self.calmness_percent()}% | smiles {self.smile_events} | surprises {self.surprise_events}"
+        )
+
+    def create_snapshot(self) -> SessionSnapshot:
+        return SessionSnapshot(
+            captured_at=time.time(),
+            calm_score_total=self.calm_score_total,
+            total_samples=self.total_samples,
+            smile_events=self.smile_events,
+            surprise_events=self.surprise_events,
+            reaction_spikes=self.reaction_spikes,
+            emotion_counts=Counter(self.emotion_counts),
+        )
+
+    def summarize_since(self, snapshot: SessionSnapshot | None) -> SessionSegmentSummary:
+        if snapshot is None:
+            mood_mix = self.mood_mix()
+            return SessionSegmentSummary(
+                duration_seconds=self.elapsed_seconds(),
+                calmness_percent=self.calmness_percent(),
+                smile_events=self.smile_events,
+                surprise_events=self.surprise_events,
+                reaction_spikes=self.reaction_spikes,
+                smiles_per_minute=self.smiles_per_minute(),
+                dominant_emotion=self.dominant_history_emotion(),
+                mood_mix=mood_mix,
+                total_samples=self.total_samples,
+            )
+
+        sample_delta = max(self.total_samples - snapshot.total_samples, 0)
+        calm_delta = max(self.calm_score_total - snapshot.calm_score_total, 0.0)
+        duration_seconds = max(int(time.time() - snapshot.captured_at), 0)
+        emotion_delta = Counter(self.emotion_counts)
+        emotion_delta.subtract(snapshot.emotion_counts)
+        emotion_counts = Counter({emotion: count for emotion, count in emotion_delta.items() if count > 0})
+        total_emotions = sum(emotion_counts.values())
+        mood_mix = {
+            emotion: int((count / total_emotions) * 100)
+            for emotion, count in emotion_counts.items()
+        } if total_emotions else {}
+        dominant_emotion = emotion_counts.most_common(1)[0][0] if emotion_counts else "neutral"
+        minutes = max(duration_seconds / 60.0, 1 / 60.0)
+
+        return SessionSegmentSummary(
+            duration_seconds=duration_seconds,
+            calmness_percent=int((calm_delta / sample_delta) * 100) if sample_delta else 0,
+            smile_events=max(self.smile_events - snapshot.smile_events, 0),
+            surprise_events=max(self.surprise_events - snapshot.surprise_events, 0),
+            reaction_spikes=max(self.reaction_spikes - snapshot.reaction_spikes, 0),
+            smiles_per_minute=max(self.smile_events - snapshot.smile_events, 0) / minutes,
+            dominant_emotion=dominant_emotion,
+            mood_mix=mood_mix,
+            total_samples=sample_delta,
         )

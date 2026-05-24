@@ -27,8 +27,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .interview import AudioChunkRecorder, GroqInterviewService, InterviewMessage, PromptSpeaker
-from .session import SessionTracker
+from .interview import AudioChunkRecorder, GroqInterviewService, InterviewMessage, PromptSpeaker, SessionReview
+from .session import SessionSnapshot, SessionTracker
 from .vision import EmotionResult, FaceAnalyzer
 
 try:
@@ -451,6 +451,42 @@ class TranscriptionWorker(QObject):
         self.finished.emit(transcript)
 
 
+class ReviewWorker(QObject):
+    finished = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(
+        self,
+        service: GroqInterviewService,
+        conversation: list[InterviewMessage],
+        expression_summary: str,
+        session_metrics: dict[str, object],
+        request_id: int,
+    ) -> None:
+        super().__init__()
+        self.service = service
+        self.conversation = conversation
+        self.expression_summary = expression_summary
+        self.session_metrics = session_metrics
+        self.request_id = request_id
+
+    def run(self) -> None:
+        try:
+            review = self.service.review_session(
+                conversation=self.conversation,
+                expression_summary=self.expression_summary,
+                session_metrics=self.session_metrics,
+            )
+        except requests.RequestException as exc:
+            self.failed.emit(self.request_id, f"Session review failed: {exc}")
+            return
+        except Exception as exc:
+            self.failed.emit(self.request_id, str(exc))
+            return
+
+        self.finished.emit(self.request_id, review)
+
+
 class MoodMirrorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -471,10 +507,14 @@ class MoodMirrorWindow(QMainWindow):
         self.interview_active = False
         self.interview_pending = False
         self.transcription_pending = False
+        self.review_pending = False
         self.interview_messages: list[InterviewMessage] = []
         self.audio_queue: list[bytes] = []
         self.interview_request_id = 0
         self.transcription_request_id = 0
+        self.review_request_id = 0
+        self.review_requested = False
+        self.interview_snapshot: SessionSnapshot | None = None
         self.worker_thread: QThread | None = None
         self.worker_object: QObject | None = None
 
@@ -625,6 +665,18 @@ class MoodMirrorWindow(QMainWindow):
         self.interview_transcript.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.interview_transcript.setPlaceholderText("The live interview transcript will appear here.")
 
+        review_title = QLabel("Final Session Review")
+        review_title.setObjectName("sectionTitle")
+        self.review_score_label = QLabel("Final score: --")
+        self.review_score_label.setObjectName("liveNote")
+        self.review_score_label.setWordWrap(True)
+        self.interview_review = QTextEdit()
+        self.interview_review.setObjectName("reviewBox")
+        self.interview_review.setReadOnly(True)
+        self.interview_review.setMinimumHeight(180)
+        self.interview_review.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.interview_review.setPlaceholderText("Press End after the interview to see answer suggestions, weak topics, and expression coaching.")
+
         self.interview_reset_hint = QLabel("Reset Session in the top bar clears the emotion metrics without closing the app.")
         self.interview_reset_hint.setObjectName("interviewMinorLabel")
         self.interview_reset_hint.setWordWrap(True)
@@ -638,6 +690,9 @@ class MoodMirrorWindow(QMainWindow):
         interview_layout.addWidget(heard_title)
         interview_layout.addWidget(self.last_heard_label)
         interview_layout.addWidget(self.interview_transcript)
+        interview_layout.addWidget(review_title)
+        interview_layout.addWidget(self.review_score_label)
+        interview_layout.addWidget(self.interview_review)
         interview_layout.addWidget(self.interview_reset_hint)
         self.side_layout.addWidget(self.interview_panel, 3)
 
@@ -942,6 +997,10 @@ class MoodMirrorWindow(QMainWindow):
                 background: rgba(2, 6, 12, 0.58);
                 color: rgba(246, 249, 255, 0.97);
             }}
+            QTextEdit#reviewBox {{
+                background: rgba(2, 6, 12, 0.48);
+                color: rgba(236, 242, 252, 0.97);
+            }}
             QScrollArea#sideScroll {{
                 background: transparent;
             }}
@@ -993,7 +1052,8 @@ class MoodMirrorWindow(QMainWindow):
         interview_mode = self.tracker.mode == "interview"
         self.interview_panel.setVisible(interview_mode)
         self.streamer_panel.setVisible(self.tracker.mode == "streamer")
-        busy = self.interview_pending or self.transcription_pending
+        worker_running = self.worker_thread is not None and self.worker_thread.isRunning()
+        busy = self.interview_pending or self.transcription_pending or self.review_pending or self.review_requested or worker_running
         self.start_interview_button.setEnabled(interview_mode and not self.interview_active and not busy)
         self.stop_interview_button.setEnabled(interview_mode and self.interview_active)
         self.confidence_panel.setVisible(self.tracker.mode != "streamer")
@@ -1011,7 +1071,11 @@ class MoodMirrorWindow(QMainWindow):
         self.interview_active = True
         self.interview_pending = False
         self.transcription_pending = False
+        self.review_pending = False
+        self.review_requested = False
+        self.interview_snapshot = self.tracker.create_snapshot()
         self.interview_transcript.clear()
+        self._reset_interview_review()
         self.last_heard_label.setText("Waiting for your first spoken answer.")
         self.listening_chip.setText("Preparing interview")
         self.interview_status_label.setText("Starting the interviewer...")
@@ -1020,6 +1084,7 @@ class MoodMirrorWindow(QMainWindow):
         self._queue_interview_request(stage="start")
 
     def _stop_interview(self) -> None:
+        had_answers = any(item.role == "user" and item.content.strip() for item in self.interview_messages)
         self.prompt_speaker.stop()
         self.speaker_poll_timer.stop()
         self.audio_recorder.stop()
@@ -1029,7 +1094,14 @@ class MoodMirrorWindow(QMainWindow):
         self.audio_queue = []
         self.listening_chip.setText("Microphone idle")
         self.mic_level_label.setText("Mic level 0%")
-        self.interview_status_label.setText("Interview session ended. Press Start to begin a fresh voice-driven round.")
+        self.review_requested = had_answers
+        if had_answers:
+            self.interview_status_label.setText("Interview session ended. Building your final review...")
+        else:
+            self.interview_status_label.setText("Interview session ended. Press Start to begin a fresh voice-driven round.")
+            self.review_score_label.setText("Final score: --")
+            self.interview_review.setPlainText("Finish at least one spoken answer to get a scored review and topic suggestions.")
+        self._start_review_if_possible()
         self._refresh_interview_controls()
 
     def _handle_audio_utterance(self, wav_bytes: bytes) -> None:
@@ -1189,6 +1261,82 @@ class MoodMirrorWindow(QMainWindow):
         self.interview_transcript.append(f"<b>{html.escape(speaker)}:</b> {safe_text}")
         self.interview_transcript.moveCursor(QTextCursor.End)
 
+    def _reset_interview_review(self) -> None:
+        self.review_score_label.setText("Final score: --")
+        self.interview_review.clear()
+        self.interview_review.setPlainText(
+            "Press End after the interview to see answer suggestions, weak topics to brush up on, and expression coaching."
+        )
+
+    def _current_interview_metrics(self) -> dict[str, object]:
+        summary = self.tracker.summarize_since(self.interview_snapshot)
+        return {
+            "duration_seconds": summary.duration_seconds,
+            "calmness_percent": summary.calmness_percent,
+            "smile_events": summary.smile_events,
+            "smiles_per_minute": round(summary.smiles_per_minute, 2),
+            "surprise_events": summary.surprise_events,
+            "reaction_spikes": summary.reaction_spikes,
+            "dominant_emotion": summary.dominant_emotion,
+            "mood_mix": summary.mood_mix,
+            "total_samples": summary.total_samples,
+        }
+
+    def _start_review_if_possible(self) -> None:
+        if not self.review_requested or self.review_pending:
+            return
+        if self.worker_thread is not None and self.worker_thread.isRunning():
+            return
+        if not any(item.role == "user" and item.content.strip() for item in self.interview_messages):
+            self.review_requested = False
+            return
+
+        self.review_requested = False
+        self.review_pending = True
+        self.review_request_id += 1
+        request_id = self.review_request_id
+        session_metrics = self._current_interview_metrics()
+        expression_summary = self.tracker.recent_expression_summary()
+        self.interview_status_label.setText("Interview session ended. Building your final review...")
+        self.review_score_label.setText("Final score: calculating...")
+        self.interview_review.setPlainText("Scoring answers, inferring brush-up topics, and preparing expression suggestions...")
+        self._refresh_interview_controls()
+
+        worker = ReviewWorker(
+            service=self.interview_service,
+            conversation=list(self.interview_messages),
+            expression_summary=expression_summary,
+            session_metrics=session_metrics,
+            request_id=request_id,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_review_finished)
+        worker.failed.connect(self._on_review_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self._clear_worker_refs)
+        thread.finished.connect(thread.deleteLater)
+        self.worker_object = worker
+        self.worker_thread = thread
+        thread.start()
+
+    def _render_review(self, review: SessionReview) -> None:
+        self.review_score_label.setText(
+            f"Final score: {review.overall_score}/100  |  Answers {review.answer_score}/100  |  Expression {review.expression_score}/100"
+        )
+        sections = [
+            f"Summary\n{review.summary}",
+            "Strengths\n" + "\n".join(f"- {item}" for item in review.strengths),
+            "Topics To Brush Up\n" + "\n".join(f"- {item}" for item in review.brush_up_topics),
+            "Answer Improvements\n" + "\n".join(f"- {item}" for item in review.answer_feedback),
+            "Expression Coaching\n" + "\n".join(f"- {item}" for item in review.expression_feedback),
+        ]
+        self.interview_review.setPlainText("\n\n".join(sections))
+
     def _on_transcription_finished(self, text: str) -> None:
         self._handle_transcription_success(self.transcription_request_id, text)
 
@@ -1201,9 +1349,28 @@ class MoodMirrorWindow(QMainWindow):
     def _on_interview_failed(self, message: str) -> None:
         self._handle_interview_failure(self.interview_request_id, message)
 
+    def _on_review_finished(self, request_id: int, review: SessionReview) -> None:
+        if request_id != self.review_request_id:
+            return
+        self.review_pending = False
+        self._render_review(review)
+        self.interview_status_label.setText(f"Interview session ended. Final score: {review.overall_score}/100.")
+        self._append_interview_entry("System", f"Final review ready. Session score: {review.overall_score}/100.")
+        self._refresh_interview_controls()
+
+    def _on_review_failed(self, request_id: int, message: str) -> None:
+        if request_id != self.review_request_id:
+            return
+        self.review_pending = False
+        self.review_score_label.setText("Final score: unavailable")
+        self.interview_review.setPlainText(message)
+        self.interview_status_label.setText("Interview session ended, but the final review could not be generated.")
+        self._refresh_interview_controls()
+
     def _clear_worker_refs(self) -> None:
         self.worker_object = None
         self.worker_thread = None
+        self._start_review_if_possible()
 
     def _update_cards(self) -> None:
         if self.tracker.mode == "interview":
