@@ -119,6 +119,9 @@ class GroqInterviewService:
         return " ".join(content.split())
 
     def transcribe_audio(self, wav_bytes: bytes) -> str:
+        return self.transcribe_audio_file(wav_bytes, "interview-response.wav", "audio/wav")
+
+    def transcribe_audio_file(self, audio_bytes: bytes, filename: str, content_type: str) -> str:
         self.reload()
         if not self.api_key:
             return ""
@@ -129,7 +132,7 @@ class GroqInterviewService:
                 "Authorization": f"Bearer {self.api_key}",
             },
             files={
-                "file": ("interview-response.wav", wav_bytes, "audio/wav"),
+                "file": (filename, audio_bytes, content_type),
             },
             data={
                 "model": self.transcription_model,

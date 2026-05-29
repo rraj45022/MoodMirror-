@@ -1,11 +1,128 @@
 # Mood Mirror
 
-Mood Mirror is a Python desktop application that uses a live webcam feed to estimate facial expression signals and transform the entire interface to match the detected mood in real time.
+Mood Mirror is being migrated from a single-process Python desktop app into a web architecture built around FastAPI, React, and Supabase.
 
-The project is designed as a demo-friendly, visually reactive experience rather than a clinical emotion analysis tool. It combines webcam capture, face detection, optional facial landmarks, lightweight expression heuristics, and a theme-driven PySide6 interface to create a responsive "emotion mirror" for demos, experiments, and creative tooling.
+The current repository now has two application surfaces:
 
-It now also includes a voice-driven AI interview panel in Interview Mode. You can start a mock interview, speak your answers out loud, let Groq transcribe them, and monitor live expression signals alongside the transcript.
+- the original PySide6 desktop prototype, which still contains the live camera, expression analysis, and voice interview flow
+- a new FastAPI backend plus React frontend scaffold that introduces login, user-scoped session persistence, and aggregated dashboard reporting
 
+This is the architecture needed for hosted deployment and per-user data management. The desktop implementation remains valuable as the source of the current interview and expression logic while the web stack replaces the delivery layer.
+
+## New Architecture
+
+```text
+.
+├── app/                   # Existing desktop prototype modules
+├── backend/
+│   └── app/
+│       ├── analytics.py   # Session aggregation logic adapted from SessionTracker
+│       ├── db.py          # SQLite-backed persistence for users, tokens, sessions, samples, messages
+│       ├── main.py        # FastAPI app and route definitions
+│       ├── schemas.py     # Pydantic API contracts
+│       └── security.py    # Password hashing and auth token helpers
+├── frontend/
+│   ├── package.json
+│   ├── index.html
+│   └── src/
+│       ├── App.jsx        # Login, dashboard, and session workspace
+│       ├── api.js         # API client
+│       └── styles.css     # UI styling
+├── main.py                # Existing desktop entrypoint
+└── requirements.txt       # Python dependencies for desktop and API work
+```
+
+## What Has Changed
+
+- `FastAPI backend`: supports register/login, bearer-token auth, per-user sessions, session messages, emotion samples, and dashboard aggregation
+- `User-scoped persistence`: stored in Supabase Postgres through the backend service layer
+- `React frontend`: adds a login screen, dashboard metrics, session creation, transcript capture, and emotion sample persistence
+- `Session analytics`: backend summaries reuse the same event logic that previously lived only inside the in-memory desktop tracker
+
+## Supabase Setup
+
+Before the backend can start, create a Supabase project and provide these values in your local `.env`:
+
+- `SUPABASE_URL`: your project URL
+- `SUPABASE_SERVICE_ROLE_KEY`: the service-role key from Project Settings → API
+- `FRONTEND_ORIGIN`: optional, defaults to `http://localhost:5173`
+
+Then open the Supabase SQL Editor and run [backend/supabase/schema.sql](backend/supabase/schema.sql).
+
+The current backend uses the service-role key only on the server side. Do not expose that key to the React app.
+
+## API Surface
+
+The new backend exposes these main routes:
+
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/me`
+- `GET /api/dashboard/summary`
+- `GET /api/sessions`
+- `POST /api/sessions`
+- `GET /api/sessions/{session_id}`
+- `POST /api/sessions/{session_id}/messages`
+- `POST /api/sessions/{session_id}/samples`
+- `POST /api/sessions/{session_id}/complete`
+
+## Local Development
+
+### Backend
+
+Create or activate your virtual environment, then install the Python requirements.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+uvicorn backend.app.main:app --reload
+```
+
+The API will start on `http://127.0.0.1:8000` by default once Supabase is configured and the schema has been applied.
+
+### Frontend
+
+In a separate terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The React app defaults to `http://127.0.0.1:8000` for API calls. To point it somewhere else, set `VITE_API_URL` before running the dev server.
+
+## Migration Direction
+
+The current web scaffold intentionally solves the architectural foundation first:
+
+- identity and login
+- durable user session storage
+- aggregate reporting per user
+- a frontend shell for session workflows
+
+The next migration step is moving live webcam and voice functionality into the browser delivery layer. That will likely mean:
+
+- webcam and microphone capture in React
+- browser-side face analysis or streamed frame inference
+- posting transcript turns and expression samples into the FastAPI session endpoints
+- tightening auth and token lifecycle around production deployment requirements
+
+## Existing Desktop Prototype
+
+The original desktop app is still available and still runs with:
+
+```bash
+python3 main.py
+```
+
+That code is the behavioral reference for the remaining migration work, especially for:
+
+- emotion scoring
+- interview orchestration
+- review generation
+- live expression metrics
 
 ## What It Does
 
