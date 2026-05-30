@@ -119,6 +119,12 @@ class AppDatabase:
     def add_messages(self, user_id: int, session_id: str, messages: list[SessionMessageInput]) -> SessionDetail:
         session = self._require_session_row(user_id, session_id)
         self._ensure_active(session)
+        self.store_messages(user_id, session_id, messages)
+        return self.get_session(user_id, session_id)
+
+    def store_messages(self, user_id: int, session_id: str, messages: list[SessionMessageInput | SessionMessageResponse]) -> None:
+        session = self._require_session_row(user_id, session_id)
+        self._ensure_active(session)
         now = time.time()
         self.client.table("session_messages").insert(
             [
@@ -131,7 +137,6 @@ class AppDatabase:
                 for message in messages
             ]
         ).execute()
-        return self.get_session(user_id, session_id)
 
     def complete_session(self, user_id: int, session_id: str, review: SessionReviewInput | None, completed_at: float | None) -> SessionDetail:
         session = self._require_session_row(user_id, session_id)

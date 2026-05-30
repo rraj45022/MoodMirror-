@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
+import sys
+import time
 
 import cv2
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -12,6 +15,7 @@ import requests
 
 from .config import FRONTEND_ORIGIN
 from .db import database
+from .session_cache import active_interview_store
 from .schemas import (
     AuthRequest,
     AuthResponse,
@@ -24,6 +28,7 @@ from .schemas import (
     SessionCreateRequest,
     SessionDetail,
     SessionMessageInput,
+    SessionMessageResponse,
     SessionReviewInput,
     SessionMessagesRequest,
     SessionSamplesRequest,
@@ -32,12 +37,29 @@ from .schemas import (
     VisionAnalysisResponse,
     VisionAnalysisResult,
 )
-from app.interview import GroqInterviewService, InterviewMessage
-from app.vision import FaceAnalyzer
+
+project_root = Path(__file__).resolve().parents[2]
+
+
+def _load_project_module(module_name: str, relative_path: str):
+    module_path = project_root / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(f"Unable to load module {module_name} from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+interview_module = _load_project_module("mood_mirror_desktop_interview", "app/interview.py")
+vision_module = _load_project_module("mood_mirror_desktop_vision", "app/vision.py")
+GroqInterviewService = interview_module.GroqInterviewService
+InterviewMessage = interview_module.InterviewMessage
+FaceAnalyzer = vision_module.FaceAnalyzer
 
 
 app = FastAPI(title="Mood Mirror API", version="0.1.0")
-project_root = Path(__file__).resolve().parents[2]
 interview_service = GroqInterviewService(project_root)
 face_analyzer = FaceAnalyzer(project_root / "models")
 
@@ -96,6 +118,37 @@ def _expression_summary(detail: SessionDetail) -> str:
 
 def _conversation(detail: SessionDetail) -> list[InterviewMessage]:
     return [InterviewMessage(role=message.role, content=message.content) for message in detail.messages if message.role in {"user", "assistant"}]
+
+
+def _detail_with_messages(detail: SessionDetail, messages: list[SessionMessageResponse]) -> SessionDetail:
+    return detail.model_copy(update={"messages": messages, "transcript_turns": len(messages)})
+
+
+def _detail_with_cached_messages(detail: SessionDetail) -> SessionDetail:
+    if detail.mode != "interview":
+        return detail
+    messages = active_interview_store.load_messages(detail.id, detail.messages)
+    return _detail_with_messages(detail, messages)
+
+
+def _pending_messages(
+    persisted_messages: list[SessionMessageResponse],
+    cached_messages: list[SessionMessageResponse],
+) -> list[SessionMessageResponse]:
+    persisted_payload = [message.model_dump() for message in persisted_messages]
+    cached_payload = [message.model_dump() for message in cached_messages]
+    if cached_payload[: len(persisted_payload)] == persisted_payload:
+        return cached_messages[len(persisted_messages) :]
+    return cached_messages
+
+
+def _flush_interview_messages(user_id: int, detail: SessionDetail) -> None:
+    if detail.mode != "interview":
+        return
+    cached_messages = active_interview_store.flush_messages(detail.id, detail.messages)
+    pending_messages = _pending_messages(detail.messages, cached_messages)
+    if pending_messages:
+        database.store_messages(user_id, detail.id, pending_messages)
 
 
 def _vision_response(detail: SessionDetail, result) -> VisionAnalysisResponse:
@@ -159,7 +212,8 @@ def create_session(payload: SessionCreateRequest, user: UserSummary = Depends(ge
 @app.get("/api/sessions/{session_id}", response_model=SessionDetail)
 def get_session(session_id: str, user: UserSummary = Depends(get_current_user)) -> SessionDetail:
     try:
-        return database.get_session(user.id, session_id)
+        detail = database.get_session(user.id, session_id)
+        return _detail_with_cached_messages(detail)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
 
@@ -199,6 +253,8 @@ def complete_session(
     user: UserSummary = Depends(get_current_user),
 ) -> SessionDetail:
     try:
+        detail = database.get_session(user.id, session_id)
+        _flush_interview_messages(user.id, detail)
         return database.complete_session(user.id, session_id, payload.review, payload.completed_at)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
@@ -212,13 +268,19 @@ def start_interview(session_id: str, user: UserSummary = Depends(get_current_use
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
 
     _ensure_interview_session(detail)
+    detail = _detail_with_cached_messages(detail)
 
     try:
         assistant_message = interview_service.generate_turn(_conversation(detail), _expression_summary(detail), "start")
     except requests.RequestException as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to generate the opening interview question") from exc
 
-    updated = database.add_messages(user.id, session_id, [SessionMessageInput(role="assistant", content=assistant_message)])
+    updated_messages = active_interview_store.append_messages(
+        session_id,
+        detail.messages,
+        [SessionMessageResponse(role="assistant", content=assistant_message, created_at=time.time())],
+    )
+    updated = _detail_with_messages(detail, updated_messages)
     return InterviewTurnResponse(session=updated, assistant_message=assistant_message)
 
 
@@ -234,6 +296,7 @@ async def respond_to_interview(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
 
     _ensure_interview_session(detail)
+    detail = _detail_with_cached_messages(detail)
 
     audio_bytes = await audio.read()
     if not audio_bytes:
@@ -251,14 +314,22 @@ async def respond_to_interview(
     if not transcript.strip():
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No clear speech was detected in the recording")
 
-    detail = database.add_messages(user.id, session_id, [SessionMessageInput(role="user", content=transcript)])
+    user_message = SessionMessageResponse(role="user", content=transcript, created_at=time.time())
+    detail = _detail_with_messages(
+        detail,
+        active_interview_store.append_messages(session_id, detail.messages, [user_message]),
+    )
 
     try:
         assistant_message = interview_service.generate_turn(_conversation(detail), _expression_summary(detail), "reply")
     except requests.RequestException as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to generate the follow-up interview question") from exc
 
-    updated = database.add_messages(user.id, session_id, [SessionMessageInput(role="assistant", content=assistant_message)])
+    assistant_record = SessionMessageResponse(role="assistant", content=assistant_message, created_at=time.time())
+    updated = _detail_with_messages(
+        detail,
+        active_interview_store.append_messages(session_id, detail.messages, [assistant_record]),
+    )
     return InterviewTurnResponse(session=updated, assistant_message=assistant_message, transcript=transcript)
 
 
@@ -286,19 +357,21 @@ async def analyze_session_frame(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not decode the uploaded frame")
 
     result = face_analyzer.analyze(image)
-    updated = detail
+    updated = _detail_with_cached_messages(detail)
     if result.face_box is not None:
-        updated = database.add_samples(
-            user.id,
-            session_id,
-            [
-                EmotionSampleInput(
-                    emotion=result.emotion,
-                    confidence=result.confidence,
-                    metrics=result.metrics,
-                    scores=result.scores,
-                )
-            ],
+        updated = _detail_with_cached_messages(
+            database.add_samples(
+                user.id,
+                session_id,
+                [
+                    EmotionSampleInput(
+                        emotion=result.emotion,
+                        confidence=result.confidence,
+                        metrics=result.metrics,
+                        scores=result.scores,
+                    )
+                ],
+            )
         )
 
     return _vision_response(updated, result)
@@ -311,6 +384,7 @@ def review_interview(session_id: str, user: UserSummary = Depends(get_current_us
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
 
+    detail = _detail_with_cached_messages(detail)
     conversation = _conversation(detail)
     review = interview_service.review_session(
         conversation,
@@ -323,6 +397,7 @@ def review_interview(session_id: str, user: UserSummary = Depends(get_current_us
             "total_samples": detail.total_samples,
         },
     )
+    _flush_interview_messages(user.id, detail)
     updated = database.complete_session(
         user.id,
         session_id,

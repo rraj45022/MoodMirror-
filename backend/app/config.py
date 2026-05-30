@@ -7,6 +7,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7
 DEFAULT_FRONTEND_ORIGIN = "http://localhost:5173"
+DEFAULT_INTERVIEW_MESSAGE_TTL_SECONDS = 60 * 60 * 6
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:
@@ -39,6 +40,8 @@ def env_value(*names: str, default: str = "") -> str:
 SUPABASE_URL = env_value("SUPABASE_URL", "supabase_url")
 SUPABASE_SERVICE_ROLE_KEY = env_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_KEY", "supabase_key")
 FRONTEND_ORIGIN = env_value("FRONTEND_ORIGIN", default=DEFAULT_FRONTEND_ORIGIN)
+REDIS_URL = env_value("REDIS_URL")
+INTERVIEW_MESSAGE_TTL_SECONDS = int(env_value("INTERVIEW_MESSAGE_TTL_SECONDS", default=str(DEFAULT_INTERVIEW_MESSAGE_TTL_SECONDS)))
 
 
 def validate_supabase_config() -> None:
