@@ -4,7 +4,6 @@ import {
   addSessionMessages,
   addSessionSamples,
   analyzeSessionFrame,
-  completeSession,
   createSession,
   fetchDashboard,
   fetchSession,
@@ -17,17 +16,6 @@ import {
 } from "./api";
 
 
-const defaultReview = {
-  overall_score: 78,
-  answer_score: 76,
-  expression_score: 80,
-  summary: "Strong baseline session. Answers were structured, but a few responses could use more specific technical depth.",
-  strengths: ["Clear pacing", "Strong composure", "Good use of examples"],
-  brush_up_topics: ["System design tradeoffs", "Behavioral story precision"],
-  answer_feedback: ["Add one metric-backed impact example", "Tighten long answers into three-step structures"],
-  expression_feedback: ["Keep eye line stable between answers", "Use brief pauses instead of filler transitions"],
-};
-
 const emotionTemplates = {
   happy: { smile_curve: 0.16, mouth_width: 0.39, mouth_open: 0.06, eye_open: 0.32, brow_raise: 0.06 },
   neutral: { smile_curve: 0.02, mouth_width: 0.31, mouth_open: 0.03, eye_open: 0.29, brow_raise: 0.05 },
@@ -35,6 +23,52 @@ const emotionTemplates = {
   sad: { smile_curve: -0.02, mouth_width: 0.28, mouth_open: 0.02, eye_open: 0.24, brow_raise: 0.03 },
   angry: { smile_curve: 0.0, mouth_width: 0.29, mouth_open: 0.02, eye_open: 0.25, brow_raise: 0.02, brow_furrow: 0.11 },
 };
+
+function formatDuration(totalSeconds) {
+  if (!totalSeconds) {
+    return "Just started";
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (!minutes) {
+    return `${seconds}s`;
+  }
+  if (!seconds) {
+    return `${minutes}m`;
+  }
+  return `${minutes}m ${seconds}s`;
+}
+
+function getWrapUp(session) {
+  if (!session?.review) {
+    return null;
+  }
+
+  return {
+    score: session.review.overall_score,
+    summary: session.review.summary,
+    strengths: session.review.strengths.slice(0, 3),
+    brushUp: session.review.brush_up_topics.slice(0, 3),
+    answerFeedback: session.review.answer_feedback.slice(0, 2),
+    expressionFeedback: session.review.expression_feedback.slice(0, 2),
+  };
+}
+
+function getDashboardStatus({ dashboard, selectedSession, wrapUp }) {
+  if (wrapUp) {
+    return `Latest wrap-up ready: ${wrapUp.score}/100 overall with fresh coaching points.`;
+  }
+
+  if (selectedSession?.status === "active") {
+    return `Active interview ready: ${selectedSession.title}. Enter the interview room when you want to start live capture.`;
+  }
+
+  if ((dashboard?.total_sessions ?? 0) > 0) {
+    return `${dashboard?.completed_sessions ?? 0} completed interviews, ${dashboard?.llm_calls_remaining_today ?? 0} LLM calls left today.`;
+  }
+
+  return "Create your first interview session to start building a performance baseline.";
+}
 
 function speakInterviewerMessage(message) {
   if (!("speechSynthesis" in window) || !message) {
@@ -391,6 +425,9 @@ function App() {
   const [dashboard, setDashboard] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [selectedSession, setSelectedSession] = useState(null);
+  const [activeView, setActiveView] = useState("dashboard");
+  const [endingSession, setEndingSession] = useState(false);
+  const [recentWrapUp, setRecentWrapUp] = useState(null);
   const [authMode, setAuthMode] = useState("login");
   const [authForm, setAuthForm] = useState({ email: "", password: "", display_name: "" });
   const [sessionForm, setSessionForm] = useState({ title: "Frontend practice round", mode: "interview" });
@@ -401,8 +438,11 @@ function App() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    if (activeView !== "interview") {
+      return;
+    }
     setInterviewStateFromSession(selectedSession);
-  }, [selectedSession?.id]);
+  }, [activeView, selectedSession]);
 
   function setInterviewStateFromSession(session) {
     if (!session || session.mode !== "interview") {
@@ -416,6 +456,9 @@ function App() {
 
   function syncSessionDetail(detail) {
     setSelectedSession(detail);
+    if (detail.review) {
+      setRecentWrapUp(detail);
+    }
     setSessions((currentSessions) => {
       const summary = {
         id: detail.id,
@@ -453,6 +496,8 @@ function App() {
       setDashboard(null);
       setSessions([]);
       setSelectedSession(null);
+      setActiveView("dashboard");
+      setRecentWrapUp(null);
       setUser(null);
       return;
     }
@@ -464,11 +509,12 @@ function App() {
         if (!active) {
           return;
         }
+        const interviewSessions = sessionsResponse.filter((session) => session.mode === "interview");
         setDashboard(dashboardResponse);
-        setSessions(sessionsResponse);
+        setSessions(interviewSessions);
         setUser(dashboardResponse.user);
-        if (sessionsResponse.length && !selectedSession) {
-          void selectSession(sessionsResponse[0].id, token);
+        if (interviewSessions.length && !selectedSession) {
+          void selectSession(interviewSessions[0].id, token);
         }
       })
       .catch((requestError) => {
@@ -517,7 +563,7 @@ function App() {
       fetchSessions(activeToken),
     ]);
     setDashboard(dashboardResponse);
-    setSessions(sessionsResponse);
+    setSessions(sessionsResponse.filter((session) => session.mode === "interview"));
     setUser(dashboardResponse.user);
   }
 
@@ -532,19 +578,12 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const created = await createSession(token, sessionForm);
-      if (created.mode === "interview") {
-        const started = await startInterview(token, created.id);
-        syncSessionDetail(started.session);
-        await refreshData();
-        setStatusMessage(started.assistant_message);
-        speakInterviewerMessage(started.assistant_message);
-      } else {
-        const detail = await selectSession(created.id);
-        syncSessionDetail(detail);
-        await refreshData();
-        setStatusMessage(`Created ${created.mode} session for ${created.title}.`);
-      }
+      const created = await createSession(token, { ...sessionForm, mode: "interview" });
+      const detail = await selectSession(created.id);
+      syncSessionDetail(detail);
+      await refreshData();
+      setActiveView("dashboard");
+      setStatusMessage(`Interview session ready for ${created.title}. Open the interview room when you want to start.`);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -595,21 +634,36 @@ function App() {
     if (!selectedSession) {
       return;
     }
-    setLoading(true);
+    setEndingSession(true);
     setError("");
     try {
-      const detail = selectedSession.mode === "interview"
-        ? (await requestInterviewReview(token, selectedSession.id)).session
-        : await completeSession(token, selectedSession.id, { review: defaultReview });
+      const detail = (await requestInterviewReview(token, selectedSession.id)).session;
       syncSessionDetail(detail);
       await refreshData();
-      setStatusMessage(selectedSession.mode === "interview" ? "Interview ended and review snapshot stored." : "Session completed and review snapshot stored.");
+      setRecentWrapUp(detail);
+      setActiveView("dashboard");
+      setStatusMessage("Interview ended and your session wrap-up is ready.");
     } catch (requestError) {
       setError(requestError.message);
     } finally {
-      setLoading(false);
+      setEndingSession(false);
     }
   }
+
+  function handleEnterInterview() {
+    if (!selectedSession) {
+      return;
+    }
+    setActiveView("interview");
+    setStatusMessage(selectedSession.status === "completed" ? "Review is ready below. Start a fresh session to practice again." : "Interview room ready. Camera will connect when this screen opens.");
+  }
+
+  const selectedWrapUp = getWrapUp(selectedSession);
+  const dashboardWrapUp = getWrapUp(recentWrapUp) || selectedWrapUp;
+  const canEnterInterview = selectedSession && selectedSession.status === "active";
+  const heroMessage = activeView === "dashboard"
+    ? getDashboardStatus({ dashboard, selectedSession, wrapUp: dashboardWrapUp })
+    : statusMessage;
 
   if (!token) {
     return (
@@ -648,13 +702,13 @@ function App() {
   return (
     <main className="shell">
       <header className="hero-card">
-        <div>
-          <p className="eyebrow">Session architecture refresh</p>
+        <div className="hero-copy">
+          <p className="eyebrow">Interview practice hub</p>
           <h1>{user ? `${user.display_name}'s dashboard` : "Dashboard"}</h1>
-          <p className="lede">User-scoped storage is now the center of the app. Browser capture and AI interview flow can post samples and transcript turns into the same backend session record.</p>
+          <p className="lede">Start from your session overview, review your aggregate performance, then enter the interview room only when you are ready for camera and microphone capture.</p>
         </div>
         <div className="hero-actions">
-          <p>{statusMessage}</p>
+          <p className="hero-status">{heroMessage}</p>
           <button className="ghost" onClick={clearAuth} type="button">Logout</button>
         </div>
       </header>
@@ -665,76 +719,141 @@ function App() {
         <MetricCard label="Total sessions" value={dashboard?.total_sessions ?? 0} />
         <MetricCard label="Completed" value={dashboard?.completed_sessions ?? 0} />
         <MetricCard label="Average calmness" value={`${dashboard?.average_calmness ?? 0}%`} />
-        <MetricCard label="Average score" value={dashboard?.average_score ? `${dashboard.average_score}/100` : "Pending"} />
+        <MetricCard label="Calls left today" value={dashboard ? `${dashboard.llm_calls_remaining_today}/${dashboard.daily_llm_call_limit}` : "--"} />
       </section>
 
-      <section className="grid content-grid">
-        <aside className="panel stack gap-lg">
-          <div>
-            <p className="panel-label">Create session</p>
-            <form className="stack" onSubmit={handleCreateSession}>
-              <label>
-                Session title
-                <input value={sessionForm.title} onChange={(event) => setSessionForm({ ...sessionForm, title: event.target.value })} required />
-              </label>
-              <label>
-                Mode
-                <select value={sessionForm.mode} onChange={(event) => setSessionForm({ ...sessionForm, mode: event.target.value })}>
-                  <option value="interview">Interview</option>
-                  <option value="mirror">Mirror</option>
-                  <option value="streamer">Streamer</option>
-                </select>
-              </label>
-              <button className="primary" disabled={loading} type="submit">Start tracked session</button>
-            </form>
-          </div>
-
-          <div>
-            <p className="panel-label">Recent sessions</p>
-            <div className="session-list">
-              {sessions.map((session) => (
-                <button
-                  className={`session-item ${selectedSession?.id === session.id ? "selected" : ""}`}
-                  key={session.id}
-                  onClick={() => void selectSession(session.id)}
-                  type="button"
-                >
-                  <strong>{session.title}</strong>
-                  <span>{session.mode} · {session.status}</span>
-                  <span>{session.latest_expression}</span>
-                </button>
-              ))}
+      {activeView === "dashboard" ? (
+        <section className="grid content-grid">
+          <aside className="panel stack gap-lg">
+            <div>
+              <p className="panel-label">Create session</p>
+              <form className="stack" onSubmit={handleCreateSession}>
+                <label>
+                  Session title
+                  <input value={sessionForm.title} onChange={(event) => setSessionForm({ ...sessionForm, title: event.target.value })} required />
+                </label>
+                <button className="primary" disabled={loading} type="submit">{loading ? "Creating..." : "Create interview session"}</button>
+              </form>
             </div>
-          </div>
-        </aside>
 
+            <div>
+              <p className="panel-label">Interview sessions</p>
+              <div className="session-list">
+                {sessions.map((session) => (
+                  <button
+                    className={`session-item ${selectedSession?.id === session.id ? "selected" : ""}`}
+                    key={session.id}
+                    onClick={() => void selectSession(session.id)}
+                    type="button"
+                  >
+                    <strong>{session.title}</strong>
+                    <span>{session.status} · {formatDuration(session.duration_seconds)}</span>
+                    <span>{session.overall_score ? `${session.overall_score}/100 overall` : session.latest_expression}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </aside>
+
+          <section className="panel stack gap-lg wide-panel">
+            <div className="workspace-head">
+              <div>
+                <p className="panel-label">Start page</p>
+                <h2>{selectedSession?.title || "Create or pick a session"}</h2>
+              </div>
+              {canEnterInterview ? (
+                <button className="primary" onClick={handleEnterInterview} type="button">Go to interview session</button>
+              ) : null}
+            </div>
+
+            {selectedSession ? (
+              <>
+                <div className="session-summary-card">
+                  <div>
+                    <p className="panel-label">Session status</p>
+                    <h3>{selectedSession.status === "completed" ? "Session completed" : "Ready to practice"}</h3>
+                    <p className="lede">
+                      {selectedSession.status === "completed"
+                        ? "Review the wrap-up below or create a new session for another round."
+                        : "Camera and microphone stay off on this page. Open the interview room when you want to begin live capture."}
+                    </p>
+                  </div>
+                  <div className="summary-pills">
+                    <span>{selectedSession.transcript_turns} transcript turns</span>
+                    <span>{selectedSession.total_samples} expression samples</span>
+                    <span>{selectedSession.dominant_emotion} dominant mood</span>
+                  </div>
+                </div>
+
+                <div className="grid detail-grid">
+                  <MetricCard label="Calmness" value={`${selectedSession.calmness_percent}%`} />
+                  <MetricCard label="Smiles" value={selectedSession.smile_events} />
+                  <MetricCard label="Surprises" value={selectedSession.surprise_events} />
+                  <MetricCard label="Duration" value={formatDuration(selectedSession.duration_seconds)} />
+                </div>
+
+                {dashboardWrapUp ? (
+                  <div className="review-card wrap-up-card">
+                    <p className="panel-label">Latest wrap-up</p>
+                    <h3>{dashboardWrapUp.score}/100 overall</h3>
+                    <p>{dashboardWrapUp.summary}</p>
+                    <div className="wrap-up-grid">
+                      <WrapUpList label="Strengths" items={dashboardWrapUp.strengths} />
+                      <WrapUpList label="Brush up next" items={dashboardWrapUp.brushUp} />
+                      <WrapUpList label="Answer coaching" items={dashboardWrapUp.answerFeedback} />
+                      <WrapUpList label="Expression coaching" items={dashboardWrapUp.expressionFeedback} />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="empty-state compact-empty-state">
+                    <p>Complete one interview to get a full wrap-up with score, strengths, and coaching points.</p>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="empty-state">
+                <p>Create an interview session to see your performance summary and enter the interview room.</p>
+              </div>
+            )}
+          </section>
+        </section>
+      ) : (
         <section className="panel stack gap-lg wide-panel">
           <div className="workspace-head">
             <div>
-              <p className="panel-label">Session workspace</p>
-              <h2>{selectedSession?.title || "Create or pick a session"}</h2>
+              <p className="panel-label">Interview session</p>
+              <h2>{selectedSession?.title || "Interview room"}</h2>
             </div>
-            {selectedSession ? (
-              <button className="primary" disabled={loading || selectedSession.status === "completed"} onClick={() => void handleCompleteSession()} type="button">
-                {selectedSession.status === "completed" ? "Session completed" : selectedSession.mode === "interview" ? "End interview" : "Complete session"}
-              </button>
-            ) : null}
+            <div className="workspace-actions">
+              <button className="ghost" onClick={() => setActiveView("dashboard")} type="button">Back to start page</button>
+              {selectedSession ? (
+                <button className="primary" disabled={endingSession || selectedSession.status === "completed"} onClick={() => void handleCompleteSession()} type="button">
+                  {selectedSession.status === "completed" ? "Session completed" : endingSession ? "Ending interview..." : "End interview"}
+                </button>
+              ) : null}
+            </div>
           </div>
+
+          {endingSession ? (
+            <div className="ending-state">
+              <div className="loading-orb" aria-hidden="true" />
+              <h3>Wrapping up your interview</h3>
+              <p>Scoring answers, summarizing expression signals, and preparing next-step coaching.</p>
+            </div>
+          ) : null}
 
           {selectedSession ? (
             <>
-              {selectedSession.mode === "interview" ? (
-                <InterviewMediaPanel
-                  active
-                  onError={(message) => setError(message)}
-                  onSessionUpdate={(detail) => {
-                    syncSessionDetail(detail);
-                  }}
-                  onStatus={setStatusMessage}
-                  session={selectedSession}
-                  token={token}
-                />
-              ) : null}
+              <InterviewMediaPanel
+                active={!endingSession}
+                onError={(message) => setError(message)}
+                onSessionUpdate={(detail) => {
+                  syncSessionDetail(detail);
+                }}
+                onStatus={setStatusMessage}
+                session={selectedSession}
+                token={token}
+              />
 
               <div className="grid detail-grid">
                 <MetricCard label="Calmness" value={`${selectedSession.calmness_percent}%`} />
@@ -747,7 +866,7 @@ function App() {
                 <p className="panel-label">Quick emotion capture</p>
                 <div className="emotion-row">
                   {Object.keys(emotionTemplates).map((emotion) => (
-                    <button disabled={loading || selectedSession.status === "completed"} key={emotion} onClick={() => void handleAddEmotion(emotion)} type="button">
+                    <button disabled={loading || endingSession || selectedSession.status === "completed"} key={emotion} onClick={() => void handleAddEmotion(emotion)} type="button">
                       {emotion}
                     </button>
                   ))}
@@ -768,7 +887,7 @@ function App() {
                   Transcript content
                   <textarea rows="4" value={messageDraft} onChange={(event) => setMessageDraft(event.target.value)} />
                 </label>
-                <button className="ghost" disabled={loading || selectedSession.status === "completed"} type="submit">Store transcript turn</button>
+                <button className="ghost" disabled={loading || endingSession || selectedSession.status === "completed"} type="submit">Store transcript turn</button>
               </form>
 
               <div className="stack gap-md">
@@ -782,23 +901,33 @@ function App() {
                   ))}
                 </div>
               </div>
-
-              {selectedSession.review ? (
-                <div className="review-card">
-                  <p className="panel-label">Session review</p>
-                  <h3>{selectedSession.review.overall_score}/100 overall</h3>
-                  <p>{selectedSession.review.summary}</p>
-                </div>
-              ) : null}
             </>
           ) : (
             <div className="empty-state">
-              <p>Select a session to start storing transcript and expression data.</p>
+              <p>Select a session from the start page before entering the interview room.</p>
             </div>
           )}
         </section>
-      </section>
+      )}
     </main>
+  );
+}
+
+
+function WrapUpList({ label, items }) {
+  if (!items?.length) {
+    return null;
+  }
+
+  return (
+    <div className="wrap-up-list">
+      <p className="panel-label">{label}</p>
+      <div className="wrap-up-items">
+        {items.map((item) => (
+          <p key={item}>{item}</p>
+        ))}
+      </div>
+    </div>
   );
 }
 

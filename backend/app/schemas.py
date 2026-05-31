@@ -141,6 +141,9 @@ class DashboardSummary(BaseModel):
     total_sessions: int
     completed_sessions: int
     active_sessions: int
+    daily_llm_call_limit: int
+    llm_calls_used_today: int
+    llm_calls_remaining_today: int
     average_calmness: int
     average_score: int | None = None
     total_smiles: int

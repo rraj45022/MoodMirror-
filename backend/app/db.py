@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import json
 import threading
 import time
@@ -10,7 +11,7 @@ from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
 from .analytics import SessionAnalytics
-from .config import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, TOKEN_TTL_SECONDS, validate_supabase_config
+from .config import DAILY_LLM_CALL_LIMIT, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, TOKEN_TTL_SECONDS, validate_supabase_config
 from .schemas import (
     DashboardSummary,
     EmotionSampleInput,
@@ -167,6 +168,9 @@ class AppDatabase:
         sessions = self.list_sessions(user_id)
         completed_sessions = [session for session in sessions if session.status == "completed"]
         active_sessions = [session for session in sessions if session.status == "active"]
+        day_start = self._start_of_utc_day()
+        llm_calls_used_today = self.count_llm_calls_since(user_id, day_start)
+        llm_calls_remaining_today = max(DAILY_LLM_CALL_LIMIT - llm_calls_used_today, 0) if DAILY_LLM_CALL_LIMIT > 0 else 0
         average_calmness = int(sum(session.calmness_percent for session in sessions) / len(sessions)) if sessions else 0
         scores = [session.overall_score for session in completed_sessions if session.overall_score is not None]
         dominant_mode = Counter(session.mode for session in sessions).most_common(1)[0][0] if sessions else None
@@ -176,6 +180,9 @@ class AppDatabase:
             total_sessions=len(sessions),
             completed_sessions=len(completed_sessions),
             active_sessions=len(active_sessions),
+            daily_llm_call_limit=DAILY_LLM_CALL_LIMIT,
+            llm_calls_used_today=llm_calls_used_today,
+            llm_calls_remaining_today=llm_calls_remaining_today,
             average_calmness=average_calmness,
             average_score=int(sum(scores) / len(scores)) if scores else None,
             total_smiles=sum(session.smile_events for session in sessions),
@@ -185,6 +192,25 @@ class AppDatabase:
             dominant_emotion=dominant_emotion,
             latest_sessions=sessions[:5],
         )
+
+    def count_llm_calls_since(self, user_id: int, started_at: float) -> int:
+        response = self.client.table("llm_usage_events").select("id", count="exact").eq("user_id", user_id).gte("created_at", started_at).execute()
+        return response.count or 0
+
+    def record_llm_calls(self, user_id: int, call_types: list[str], recorded_at: float | None = None) -> None:
+        if not call_types:
+            return
+        event_time = recorded_at or time.time()
+        self.client.table("llm_usage_events").insert(
+            [
+                {
+                    "user_id": user_id,
+                    "call_type": call_type,
+                    "created_at": event_time,
+                }
+                for call_type in call_types
+            ]
+        ).execute()
 
     def _issue_token(self, user_id: int) -> str:
         token = create_token()
@@ -198,6 +224,12 @@ class AppDatabase:
             }
         ).execute()
         return token
+
+    @staticmethod
+    def _start_of_utc_day(timestamp: float | None = None) -> float:
+        current = timestamp or time.time()
+        utc = time.gmtime(current)
+        return float(calendar.timegm((utc.tm_year, utc.tm_mon, utc.tm_mday, 0, 0, 0, 0, 0, 0)))
 
     def _require_session_row(self, user_id: int, session_id: str) -> dict[str, object]:
         rows = self.client.table("interview_sessions").select("*").eq("id", session_id).eq("user_id", user_id).limit(1).execute().data or []

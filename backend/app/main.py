@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import importlib.util
 from pathlib import Path
 import sys
@@ -13,7 +14,7 @@ from fastapi.responses import JSONResponse, Response
 import numpy as np
 import requests
 
-from .config import FRONTEND_ORIGIN
+from .config import DAILY_LLM_CALL_LIMIT, FRONTEND_ORIGIN
 from .db import database
 from .session_cache import active_interview_store
 from .schemas import (
@@ -166,6 +167,35 @@ def _vision_response(detail: SessionDetail, result) -> VisionAnalysisResponse:
     )
 
 
+def _start_of_utc_day(timestamp: float | None = None) -> float:
+    current = timestamp or time.time()
+    utc = time.gmtime(current)
+    return float(calendar.timegm((utc.tm_year, utc.tm_mon, utc.tm_mday, 0, 0, 0, 0, 0, 0)))
+
+
+def _consume_llm_quota(user_id: int, call_types: list[str]) -> None:
+    if DAILY_LLM_CALL_LIMIT <= 0 or not call_types:
+        return
+
+    interview_service.reload()
+    if not interview_service.api_key:
+        return
+
+    day_start = _start_of_utc_day()
+    used_calls = database.count_llm_calls_since(user_id, day_start)
+    if used_calls + len(call_types) > DAILY_LLM_CALL_LIMIT:
+        remaining = max(DAILY_LLM_CALL_LIMIT - used_calls, 0)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Daily LLM quota exceeded. Limit: {DAILY_LLM_CALL_LIMIT} calls per UTC day. "
+                f"Remaining today: {remaining}."
+            ),
+        )
+
+    database.record_llm_calls(user_id, call_types)
+
+
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
@@ -269,6 +299,7 @@ def start_interview(session_id: str, user: UserSummary = Depends(get_current_use
 
     _ensure_interview_session(detail)
     detail = _detail_with_cached_messages(detail)
+    _consume_llm_quota(user.id, ["interview_start"])
 
     try:
         assistant_message = interview_service.generate_turn(_conversation(detail), _expression_summary(detail), "start")
@@ -297,6 +328,7 @@ async def respond_to_interview(
 
     _ensure_interview_session(detail)
     detail = _detail_with_cached_messages(detail)
+    _consume_llm_quota(user.id, ["transcription", "interview_reply"])
 
     audio_bytes = await audio.read()
     if not audio_bytes:
@@ -385,6 +417,7 @@ def review_interview(session_id: str, user: UserSummary = Depends(get_current_us
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
 
     detail = _detail_with_cached_messages(detail)
+    _consume_llm_quota(user.id, ["interview_review"])
     conversation = _conversation(detail)
     review = interview_service.review_session(
         conversation,
