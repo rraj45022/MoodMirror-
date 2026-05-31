@@ -57,6 +57,12 @@ button {
   place-items: center;
 }
 
+.shell-auth-stack {
+  width: min(760px, 100%);
+  display: grid;
+  gap: 18px;
+}
+
 .auth-card,
 .hero-card,
 .panel,
@@ -472,11 +478,52 @@ textarea {
   gap: 10px;
 }
 
+.interview-toggle {
+  margin: 0;
+}
+
+.interview-toggle button {
+  min-width: 140px;
+}
+
+.interview-toggle button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .media-note {
   max-width: 32ch;
   color: var(--muted);
   font-size: 0.92rem;
   line-height: 1.5;
+}
+
+.legal-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(240px, 1fr);
+  gap: 18px;
+  margin-top: 20px;
+  padding: 20px 24px;
+  border-radius: 24px;
+  backdrop-filter: blur(18px);
+  background: rgba(255, 251, 245, 0.7);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+.legal-block {
+  display: grid;
+  gap: 8px;
+}
+
+.legal-block p:last-child {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.legal-block-compact {
+  align-content: start;
 }
 
 .transcript-item p {
@@ -515,7 +562,8 @@ textarea {
   .detail-grid,
   .content-grid,
   .wrap-up-grid,
-  .session-summary-card {
+  .session-summary-card,
+  .legal-panel {
     grid-template-columns: 1fr;
   }
 

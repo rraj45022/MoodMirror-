@@ -81,6 +81,31 @@ uvicorn backend.app.main:app --reload
 
 The API will start on `http://127.0.0.1:8000` by default once Supabase is configured and the schema has been applied.
 
+### Render Deployment
+
+The repository now includes [render.yaml](render.yaml) plus [backend/requirements-render.txt](backend/requirements-render.txt) for deploying only the FastAPI backend on Render.
+
+Use these settings on Render:
+
+- Root Directory: repository root
+- Build Command: `pip install -r backend/requirements-render.txt`
+- Start Command: `uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT`
+
+Set these environment variables in Render before the first deploy:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `FRONTEND_ORIGIN`
+- `REDIS_URL` for hosted Redis, not your local `localhost` instance
+
+If you use the interview endpoints after restoring the desktop interview module, also set:
+
+- `GROQ_API_KEY`
+- `GROQ_MODEL`
+- `GROQ_TRANSCRIPTION_MODEL`
+
+Important: the current repository does not include the original desktop `app/interview.py` and `app/vision.py` modules that the hosted interview and vision routes depend on. The backend now boots without them, but `/api/sessions/{session_id}/interview/*` and `/api/sessions/{session_id}/vision/analyze` return `503` until those modules are added back or replaced.
+
 ### Frontend
 
 In a separate terminal:

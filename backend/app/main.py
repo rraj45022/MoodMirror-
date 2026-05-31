@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import importlib.util
+import logging
 from pathlib import Path
 import sys
 import time
@@ -39,11 +40,15 @@ from .schemas import (
     VisionAnalysisResult,
 )
 
+LOGGER = logging.getLogger(__name__)
+
 project_root = Path(__file__).resolve().parents[2]
 
 
 def _load_project_module(module_name: str, relative_path: str):
     module_path = project_root / relative_path
+    if not module_path.exists():
+        raise FileNotFoundError(f"Unable to load module {module_name} from {module_path}")
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         raise ModuleNotFoundError(f"Unable to load module {module_name} from {module_path}")
@@ -53,16 +58,28 @@ def _load_project_module(module_name: str, relative_path: str):
     return module
 
 
-interview_module = _load_project_module("mood_mirror_desktop_interview", "app/interview.py")
-vision_module = _load_project_module("mood_mirror_desktop_vision", "app/vision.py")
-GroqInterviewService = interview_module.GroqInterviewService
-InterviewMessage = interview_module.InterviewMessage
-FaceAnalyzer = vision_module.FaceAnalyzer
+try:
+    interview_module = _load_project_module("mood_mirror_desktop_interview", "backend/app/interview.py")
+    GroqInterviewService = interview_module.GroqInterviewService
+    InterviewMessage = interview_module.InterviewMessage
+except (FileNotFoundError, ModuleNotFoundError) as exc:
+    interview_module = None
+    GroqInterviewService = None
+    InterviewMessage = None
+    LOGGER.warning("Interview service disabled: %s", exc)
+
+try:
+    vision_module = _load_project_module("mood_mirror_desktop_vision", "backend/app/vision.py")
+    FaceAnalyzer = vision_module.FaceAnalyzer
+except (FileNotFoundError, ModuleNotFoundError) as exc:
+    vision_module = None
+    FaceAnalyzer = None
+    LOGGER.warning("Vision service disabled: %s", exc)
 
 
 app = FastAPI(title="Mood Mirror API", version="0.1.0")
-interview_service = GroqInterviewService(project_root)
-face_analyzer = FaceAnalyzer(project_root / "models")
+interview_service = GroqInterviewService(project_root) if GroqInterviewService is not None else None
+face_analyzer = FaceAnalyzer(project_root / "models") if FaceAnalyzer is not None else None
 
 app.add_middleware(
     CORSMiddleware,
@@ -121,6 +138,22 @@ def _conversation(detail: SessionDetail) -> list[InterviewMessage]:
     return [InterviewMessage(role=message.role, content=message.content) for message in detail.messages if message.role in {"user", "assistant"}]
 
 
+def _require_interview_service() -> None:
+    if interview_service is None or InterviewMessage is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Interview features are unavailable because the desktop interview module is not present in this deployment.",
+        )
+
+
+def _require_face_analyzer() -> None:
+    if face_analyzer is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vision analysis is unavailable because the desktop vision module is not present in this deployment.",
+        )
+
+
 def _detail_with_messages(detail: SessionDetail, messages: list[SessionMessageResponse]) -> SessionDetail:
     return detail.model_copy(update={"messages": messages, "transcript_turns": len(messages)})
 
@@ -175,6 +208,9 @@ def _start_of_utc_day(timestamp: float | None = None) -> float:
 
 def _consume_llm_quota(user_id: int, call_types: list[str]) -> None:
     if DAILY_LLM_CALL_LIMIT <= 0 or not call_types:
+        return
+
+    if interview_service is None:
         return
 
     interview_service.reload()
@@ -292,6 +328,7 @@ def complete_session(
 
 @app.post("/api/sessions/{session_id}/interview/start", response_model=InterviewTurnResponse)
 def start_interview(session_id: str, user: UserSummary = Depends(get_current_user)) -> InterviewTurnResponse:
+    _require_interview_service()
     try:
         detail = database.get_session(user.id, session_id)
     except KeyError as exc:
@@ -321,6 +358,7 @@ async def respond_to_interview(
     audio: UploadFile = File(...),
     user: UserSummary = Depends(get_current_user),
 ) -> InterviewTurnResponse:
+    _require_interview_service()
     try:
         detail = database.get_session(user.id, session_id)
     except KeyError as exc:
@@ -371,6 +409,7 @@ async def analyze_session_frame(
     frame: UploadFile = File(...),
     user: UserSummary = Depends(get_current_user),
 ) -> VisionAnalysisResponse:
+    _require_face_analyzer()
     try:
         detail = database.get_session(user.id, session_id)
     except KeyError as exc:
@@ -411,6 +450,7 @@ async def analyze_session_frame(
 
 @app.post("/api/sessions/{session_id}/interview/review", response_model=InterviewReviewResponse)
 def review_interview(session_id: str, user: UserSummary = Depends(get_current_user)) -> InterviewReviewResponse:
+    _require_interview_service()
     try:
         detail = database.get_session(user.id, session_id)
     except KeyError as exc:

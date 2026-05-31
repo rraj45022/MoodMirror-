@@ -84,7 +84,7 @@ function speakInterviewerMessage(message) {
 }
 
 
-function InterviewMediaPanel({ active, session, token, onSessionUpdate, onStatus, onError }) {
+function InterviewMediaPanel({ active, endingSession, session, token, onEndInterview, onSessionUpdate, onStatus, onError }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -404,9 +404,24 @@ function InterviewMediaPanel({ active, session, token, onSessionUpdate, onStatus
         </div>
 
         <div className="media-actions">
-          <button className="primary" disabled={processing || interviewStarted || sessionClosed} onClick={handleStartInterview} type="button">
-            {processing && !interviewStarted ? "Starting..." : "Start interview"}
-          </button>
+          <div className="toggle-row interview-toggle" role="group" aria-label="Interview controls">
+            <button
+              className={interviewStarted ? "" : "active"}
+              disabled={processing || endingSession || interviewStarted || sessionClosed}
+              onClick={handleStartInterview}
+              type="button"
+            >
+              {processing && !interviewStarted ? "Starting..." : "Start interview"}
+            </button>
+            <button
+              className={interviewStarted && !sessionClosed ? "active" : ""}
+              disabled={processing || endingSession || !interviewStarted || sessionClosed}
+              onClick={() => void onEndInterview()}
+              type="button"
+            >
+              {endingSession ? "Ending..." : "End interview"}
+            </button>
+          </div>
           <button className="ghost" disabled={processing || mediaState !== "ready" || !interviewStarted || sessionClosed} onClick={handleRecordAnswer} type="button">
             {processing ? "Processing..." : recording ? "Stop recording" : "Record answer"}
           </button>
@@ -668,33 +683,36 @@ function App() {
   if (!token) {
     return (
       <main className="shell shell-auth">
-        <section className="auth-card">
-          <p className="eyebrow">Mood Mirror Web</p>
-          <h1>Login-first interview analytics.</h1>
-          <p className="lede">FastAPI stores user sessions and aggregate metrics. React becomes the delivery surface for webcam, transcript, and review flows.</p>
-          <div className="toggle-row">
-            <button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")} type="button">Login</button>
-            <button className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")} type="button">Register</button>
-          </div>
-          <form className="stack" onSubmit={handleAuthSubmit}>
-            {authMode === "register" ? (
+        <div className="shell-auth-stack">
+          <section className="auth-card">
+            <p className="eyebrow">Mood Mirror Web</p>
+            <h1>Login-first interview analytics.</h1>
+            <p className="lede">FastAPI stores user sessions and aggregate metrics. React becomes the delivery surface for webcam, transcript, and review flows.</p>
+            <div className="toggle-row">
+              <button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")} type="button">Login</button>
+              <button className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")} type="button">Register</button>
+            </div>
+            <form className="stack" onSubmit={handleAuthSubmit}>
+              {authMode === "register" ? (
+                <label>
+                  Display name
+                  <input value={authForm.display_name} onChange={(event) => setAuthForm({ ...authForm, display_name: event.target.value })} required />
+                </label>
+              ) : null}
               <label>
-                Display name
-                <input value={authForm.display_name} onChange={(event) => setAuthForm({ ...authForm, display_name: event.target.value })} required />
+                Email
+                <input type="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} required />
               </label>
-            ) : null}
-            <label>
-              Email
-              <input type="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} required />
-            </label>
-            <label>
-              Password
-              <input type="password" value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} required minLength={8} />
-            </label>
-            <button className="primary" disabled={loading} type="submit">{loading ? "Working..." : authMode === "login" ? "Login" : "Create account"}</button>
-          </form>
-          {error ? <p className="error-banner">{error}</p> : null}
-        </section>
+              <label>
+                Password
+                <input type="password" value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} required minLength={8} />
+              </label>
+              <button className="primary" disabled={loading} type="submit">{loading ? "Working..." : authMode === "login" ? "Login" : "Create account"}</button>
+            </form>
+            {error ? <p className="error-banner">{error}</p> : null}
+          </section>
+          <SiteFooter />
+        </div>
       </main>
     );
   }
@@ -826,11 +844,6 @@ function App() {
             </div>
             <div className="workspace-actions">
               <button className="ghost" onClick={() => setActiveView("dashboard")} type="button">Back to start page</button>
-              {selectedSession ? (
-                <button className="primary" disabled={endingSession || selectedSession.status === "completed"} onClick={() => void handleCompleteSession()} type="button">
-                  {selectedSession.status === "completed" ? "Session completed" : endingSession ? "Ending interview..." : "End interview"}
-                </button>
-              ) : null}
             </div>
           </div>
 
@@ -846,6 +859,8 @@ function App() {
             <>
               <InterviewMediaPanel
                 active={!endingSession}
+                endingSession={endingSession}
+                onEndInterview={handleCompleteSession}
                 onError={(message) => setError(message)}
                 onSessionUpdate={(detail) => {
                   syncSessionDetail(detail);
@@ -909,6 +924,8 @@ function App() {
           )}
         </section>
       )}
+
+      <SiteFooter />
     </main>
   );
 }
@@ -928,6 +945,26 @@ function WrapUpList({ label, items }) {
         ))}
       </div>
     </div>
+  );
+}
+
+
+function SiteFooter() {
+  return (
+    <footer className="legal-panel">
+      <div className="legal-block">
+        <p className="panel-label">Privacy policy</p>
+        <p>
+          Mood Mirror stores interview sessions, transcript turns, expression samples, and review summaries to support your
+          practice history. Keep sensitive personal or company information out of mock interview responses unless you are
+          comfortable storing it in this application.
+        </p>
+      </div>
+      <div className="legal-block legal-block-compact">
+        <p className="panel-label">Copyright</p>
+        <p>© 2026 Mood Mirror. All rights reserved.</p>
+      </div>
+    </footer>
   );
 }
 
