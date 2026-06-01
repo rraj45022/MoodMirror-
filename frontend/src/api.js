@@ -15,6 +15,10 @@ async function request(path, { token, method = "GET", body } = {}) {
     throw new Error(payload.detail || "Request failed");
   }
 
+  if (response.status === 204) {
+    return null;
+  }
+
   return response.json();
 }
 
@@ -40,6 +44,10 @@ export function createSession(token, body) {
 
 export function fetchSession(token, sessionId) {
   return request(`/api/sessions/${sessionId}`, { token });
+}
+
+export function deleteSession(token, sessionId) {
+  return request(`/api/sessions/${sessionId}`, { token, method: "DELETE" });
 }
 
 export function addSessionMessages(token, sessionId, messages) {

@@ -163,6 +163,10 @@ class AppDatabase:
         summary = self._session_summary_from_row(user_id, row, messages=messages, review=review)
         return SessionDetail(**summary.model_dump(), messages=messages, review=review)
 
+    def delete_session(self, user_id: int, session_id: str) -> None:
+        self._require_session_row(user_id, session_id)
+        self.client.table("interview_sessions").delete().eq("id", session_id).eq("user_id", user_id).execute()
+
     def dashboard_summary(self, user_id: int) -> DashboardSummary:
         user = self.get_user(user_id)
         sessions = self.list_sessions(user_id)

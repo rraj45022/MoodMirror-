@@ -95,16 +95,22 @@ Set these environment variables in Render before the first deploy:
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `FRONTEND_ORIGIN`
+- `FRONTEND_ORIGIN` for one or more allowed production origins, separated by commas if needed
+- `FRONTEND_ORIGIN_REGEX` if you want to allow preview domains such as Vercel preview URLs
 - `REDIS_URL` for hosted Redis, not your local `localhost` instance
 
-If you use the interview endpoints after restoring the desktop interview module, also set:
+If you use the interview endpoints, also set:
 
 - `GROQ_API_KEY`
 - `GROQ_MODEL`
 - `GROQ_TRANSCRIPTION_MODEL`
 
-Important: the current repository does not include the original desktop `app/interview.py` and `app/vision.py` modules that the hosted interview and vision routes depend on. The backend now boots without them, but `/api/sessions/{session_id}/interview/*` and `/api/sessions/{session_id}/vision/analyze` return `503` until those modules are added back or replaced.
+The hosted backend now uses browser-provided media capture from the React app. Render handles API, persistence, Groq requests, and uploaded frame analysis. `PySide6` remains a desktop-only dependency and is not required by the deployed FastAPI interview routes.
+
+For a typical Vercel plus Render setup:
+
+- set `FRONTEND_ORIGIN` to your main Vercel production URL
+- optionally set `FRONTEND_ORIGIN_REGEX` to a regex such as `https://.*\\.vercel\\.app` if you want preview deploys to call the API too
 
 ### Frontend
 
@@ -127,7 +133,7 @@ The current web scaffold intentionally solves the architectural foundation first
 - aggregate reporting per user
 - a frontend shell for session workflows
 
-The next migration step is moving live webcam and voice functionality into the browser delivery layer. That will likely mean:
+The next migration step is tightening the browser-first delivery layer. That includes:
 
 - webcam and microphone capture in React
 - browser-side face analysis or streamed frame inference

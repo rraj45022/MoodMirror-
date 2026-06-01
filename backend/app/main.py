@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import calendar
-import importlib.util
 import logging
 from pathlib import Path
-import sys
 import time
 
 import cv2
@@ -15,8 +13,9 @@ from fastapi.responses import JSONResponse, Response
 import numpy as np
 import requests
 
-from .config import DAILY_LLM_CALL_LIMIT, FRONTEND_ORIGIN
+from .config import DAILY_LLM_CALL_LIMIT, FRONTEND_ORIGIN_REGEX, frontend_origins
 from .db import database
+from .interview import GroqInterviewService, InterviewMessage
 from .session_cache import active_interview_store
 from .schemas import (
     AuthRequest,
@@ -39,51 +38,23 @@ from .schemas import (
     VisionAnalysisResponse,
     VisionAnalysisResult,
 )
+from .vision import FaceAnalyzer
 
 LOGGER = logging.getLogger(__name__)
 
 project_root = Path(__file__).resolve().parents[2]
 
 
-def _load_project_module(module_name: str, relative_path: str):
-    module_path = project_root / relative_path
-    if not module_path.exists():
-        raise FileNotFoundError(f"Unable to load module {module_name} from {module_path}")
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise ModuleNotFoundError(f"Unable to load module {module_name} from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-try:
-    interview_module = _load_project_module("mood_mirror_desktop_interview", "backend/app/interview.py")
-    GroqInterviewService = interview_module.GroqInterviewService
-    InterviewMessage = interview_module.InterviewMessage
-except (FileNotFoundError, ModuleNotFoundError) as exc:
-    interview_module = None
-    GroqInterviewService = None
-    InterviewMessage = None
-    LOGGER.warning("Interview service disabled: %s", exc)
-
-try:
-    vision_module = _load_project_module("mood_mirror_desktop_vision", "backend/app/vision.py")
-    FaceAnalyzer = vision_module.FaceAnalyzer
-except (FileNotFoundError, ModuleNotFoundError) as exc:
-    vision_module = None
-    FaceAnalyzer = None
-    LOGGER.warning("Vision service disabled: %s", exc)
-
-
 app = FastAPI(title="Mood Mirror API", version="0.1.0")
-interview_service = GroqInterviewService(project_root) if GroqInterviewService is not None else None
-face_analyzer = FaceAnalyzer(project_root / "models") if FaceAnalyzer is not None else None
+interview_service = GroqInterviewService(project_root)
+face_analyzer = FaceAnalyzer(project_root / "models")
+
+allowed_origins = [*frontend_origins(), "http://127.0.0.1:5173", "http://localhost:5173"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN, "http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=list(dict.fromkeys(allowed_origins)),
+    allow_origin_regex=FRONTEND_ORIGIN_REGEX or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -139,10 +110,10 @@ def _conversation(detail: SessionDetail) -> list[InterviewMessage]:
 
 
 def _require_interview_service() -> None:
-    if interview_service is None or InterviewMessage is None:
+    if interview_service is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Interview features are unavailable because the desktop interview module is not present in this deployment.",
+            detail="Interview features are unavailable in this deployment.",
         )
 
 
@@ -150,7 +121,7 @@ def _require_face_analyzer() -> None:
     if face_analyzer is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vision analysis is unavailable because the desktop vision module is not present in this deployment.",
+            detail="Vision analysis is unavailable in this deployment.",
         )
 
 
@@ -282,6 +253,17 @@ def get_session(session_id: str, user: UserSummary = Depends(get_current_user)) 
         return _detail_with_cached_messages(detail)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
+
+
+@app.delete("/api/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_session(session_id: str, user: UserSummary = Depends(get_current_user)) -> Response:
+    try:
+        database.delete_session(user.id, session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
+
+    active_interview_store.clear(session_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/sessions/{session_id}/samples", response_model=SessionDetail)

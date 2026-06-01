@@ -5,6 +5,7 @@ import {
   addSessionSamples,
   analyzeSessionFrame,
   createSession,
+  deleteSession,
   fetchDashboard,
   fetchSession,
   fetchSessions,
@@ -426,7 +427,7 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
             {processing ? "Processing..." : recording ? "Stop recording" : "Record answer"}
           </button>
           <button className="ghost" onClick={speakTestPrompt} type="button">Test interviewer voice</button>
-          <p className="media-note">Preview uses browser camera and microphone access on `localhost`.</p>
+          <p className="media-note">Preview uses browser camera and microphone access in any supported secure browser session.</p>
         </div>
       </div>
     </section>
@@ -577,9 +578,11 @@ function App() {
       fetchDashboard(activeToken),
       fetchSessions(activeToken),
     ]);
+    const interviewSessions = sessionsResponse.filter((session) => session.mode === "interview");
     setDashboard(dashboardResponse);
-    setSessions(sessionsResponse.filter((session) => session.mode === "interview"));
+    setSessions(interviewSessions);
     setUser(dashboardResponse.user);
+    return { dashboard: dashboardResponse, sessions: interviewSessions };
   }
 
   async function selectSession(sessionId, activeToken = token) {
@@ -662,6 +665,46 @@ function App() {
       setError(requestError.message);
     } finally {
       setEndingSession(false);
+    }
+  }
+
+  async function handleDeleteSession() {
+    if (!selectedSession) {
+      return;
+    }
+
+    const sessionToDelete = selectedSession;
+    const confirmed = window.confirm(`Delete \"${sessionToDelete.title}\" and all of its stored transcript and expression data?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      await deleteSession(token, sessionToDelete.id);
+      const { sessions: remainingSessions } = await refreshData();
+      const nextSession = remainingSessions.find((session) => session.id !== sessionToDelete.id) || null;
+
+      setActiveView("dashboard");
+
+      if (nextSession) {
+        await selectSession(nextSession.id);
+      } else {
+        setSelectedSession(null);
+        if (recentWrapUp?.id === sessionToDelete.id) {
+          setRecentWrapUp(null);
+        }
+      }
+
+      if (recentWrapUp?.id === sessionToDelete.id) {
+        setRecentWrapUp(null);
+      }
+      setStatusMessage(`Deleted session data for ${sessionToDelete.title}.`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -779,9 +822,16 @@ function App() {
                 <p className="panel-label">Start page</p>
                 <h2>{selectedSession?.title || "Create or pick a session"}</h2>
               </div>
-              {canEnterInterview ? (
-                <button className="primary" onClick={handleEnterInterview} type="button">Go to interview session</button>
-              ) : null}
+              <div className="workspace-actions">
+                {selectedSession ? (
+                  <button className="ghost" disabled={loading || endingSession} onClick={() => void handleDeleteSession()} type="button">
+                    Delete session
+                  </button>
+                ) : null}
+                {canEnterInterview ? (
+                  <button className="primary" onClick={handleEnterInterview} type="button">Go to interview session</button>
+                ) : null}
+              </div>
             </div>
 
             {selectedSession ? (
@@ -843,6 +893,9 @@ function App() {
               <h2>{selectedSession?.title || "Interview room"}</h2>
             </div>
             <div className="workspace-actions">
+              {selectedSession ? (
+                <button className="ghost" disabled={loading || endingSession} onClick={() => void handleDeleteSession()} type="button">Delete session</button>
+              ) : null}
               <button className="ghost" onClick={() => setActiveView("dashboard")} type="button">Back to start page</button>
             </div>
           </div>
