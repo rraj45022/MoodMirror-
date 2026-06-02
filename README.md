@@ -1,6 +1,6 @@
-# Mood Mirror
+# Interview Presence Coach
 
-Mood Mirror is being migrated from a single-process Python desktop app into a web architecture built around FastAPI, React, and Supabase.
+Interview Presence Coach is being migrated from a single-process Python desktop app into a web architecture built around FastAPI, React, and Supabase.
 
 The current repository now has two application surfaces:
 
@@ -165,7 +165,7 @@ That code is the behavioral reference for the remaining migration work, especial
 
 ## What It Does
 
-Mood Mirror watches the active webcam stream, finds a face, estimates expression cues such as mouth openness, smile curvature, eyebrow movement, and eye openness, then maps those cues into a mood category.
+Interview Presence Coach watches the active webcam stream, finds a face, estimates expression cues such as mouth openness, smile curvature, eyebrow movement, and eye openness, then maps those cues into a mood category.
 
 The current mood drives both the visual theme and the data shown in the side panel.
 
@@ -304,7 +304,7 @@ Or, using the interpreter path that has been used in this workspace:
 
 ## First-Run Behavior
 
-On the first run, Mood Mirror attempts to download the open-source OpenCV LBF landmark model into the local `models/` directory.
+On the first run, Interview Presence Coach attempts to download the open-source OpenCV LBF landmark model into the local `models/` directory.
 
 - If the download succeeds, the app can draw facial landmarks and use the higher-fidelity geometry path.
 - If the download fails, the app still runs using cascade-based fallback tracking.

@@ -46,7 +46,7 @@ LOGGER = logging.getLogger(__name__)
 project_root = Path(__file__).resolve().parents[2]
 
 
-app = FastAPI(title="Mood Mirror API", version="0.1.0")
+app = FastAPI(title="Interview Presence Coach API", version="0.1.0")
 interview_service = GroqInterviewService(project_root)
 face_analyzer = FaceAnalyzer(project_root / "models")
 
@@ -249,7 +249,7 @@ def _oauth_display_name(oauth_user: dict[str, object]) -> str:
     if isinstance(email, str) and email.strip():
         return email.split("@", 1)[0][:120]
 
-    return "Mood Mirror User"
+    return "Interview Presence Coach User"
 
 
 @app.get("/health")

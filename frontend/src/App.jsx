@@ -931,9 +931,9 @@ function App() {
       <main className="shell shell-auth">
         <div className="shell-auth-stack">
           <section className="auth-card">
-            <p className="eyebrow">Mood Mirror Web</p>
+            <p className="eyebrow">Interview Presence Coach Web</p>
             <h1>Login-first interview analytics.</h1>
-            <p className="lede">FastAPI stores user sessions and aggregate metrics. React becomes the delivery surface for webcam, transcript, and review flows.</p>
+            <p className="lede">Practice mock interviews, review your session history, and track how your confidence and performance improve over time.</p>
             <div className="social-auth-grid">
               <button className="oauth-button" disabled={loading || !socialAuthEnabled} onClick={() => void handleSocialAuth("google")} type="button">
                 Continue with Google
@@ -944,7 +944,7 @@ function App() {
             </div>
             <p className="auth-helper-text">
               {socialAuthEnabled
-                ? "Social sign-in uses Supabase OAuth and then links that identity to your Mood Mirror history."
+                ? "Social sign-in uses Supabase OAuth and then links that identity to your Interview Presence Coach history."
                 : "Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY to enable Google and GitHub sign-in."}
             </p>
             <div className="auth-divider"><span>or continue with email</span></div>
@@ -1244,14 +1244,14 @@ function SiteFooter() {
       <div className="legal-block">
         <p className="panel-label">Privacy policy</p>
         <p>
-          Mood Mirror stores interview sessions, transcript turns, expression samples, and review summaries to support your
+          Interview Presence Coach stores interview sessions, transcript turns, expression samples, and review summaries to support your
           practice history. Keep sensitive personal or company information out of mock interview responses unless you are
           comfortable storing it in this application.
         </p>
       </div>
       <div className="legal-block legal-block-compact">
         <p className="panel-label">Copyright</p>
-        <p>© 2026 Mood Mirror. All rights reserved.</p>
+        <p>© 2026 Interview Presence Coach. All rights reserved.</p>
       </div>
     </footer>
   );
