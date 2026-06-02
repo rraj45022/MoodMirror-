@@ -110,6 +110,10 @@ def _conversation(detail: SessionDetail) -> list[InterviewMessage]:
     return [InterviewMessage(role=message.role, content=message.content) for message in detail.messages if message.role in {"user", "assistant"}]
 
 
+def _opening_interview_prompt() -> str:
+    return "Let’s start your mock interview. Tell me about yourself and the technical work you have been doing most recently."
+
+
 def _require_interview_service() -> None:
     if interview_service is None:
         raise HTTPException(
@@ -379,12 +383,7 @@ def start_interview(session_id: str, user: UserSummary = Depends(get_current_use
 
     _ensure_interview_session(detail)
     detail = _detail_with_cached_messages(detail)
-    _consume_llm_quota(user.id, ["interview_start"])
-
-    try:
-        assistant_message = interview_service.generate_turn(_conversation(detail), _expression_summary(detail), "start")
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to generate the opening interview question") from exc
+    assistant_message = _opening_interview_prompt()
 
     updated_messages = active_interview_store.append_messages(
         session_id,
