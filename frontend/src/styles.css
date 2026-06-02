@@ -75,7 +75,7 @@ button {
 }
 
 .auth-card {
-  width: min(520px, 100%);
+  width: 100%;
   padding: 32px;
   border-radius: 28px;
 }
