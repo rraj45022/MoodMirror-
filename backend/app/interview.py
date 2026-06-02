@@ -5,12 +5,14 @@ import json
 from pathlib import Path
 import os
 import re
+import threading
 import time
 
 import requests
 
 
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_GROQ_INTERVIEW_MODEL = "llama-3.1-8b-instant"
+DEFAULT_GROQ_REVIEW_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_GROQ_TRANSCRIPTION_MODEL = "whisper-large-v3-turbo"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_AUDIO_TRANSCRIPTIONS_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -37,20 +39,44 @@ class SessionReview:
 class GroqInterviewService:
     def __init__(self, project_dir: str | Path) -> None:
         self.project_dir = Path(project_dir)
+        self._thread_local = threading.local()
         self.reload()
 
     def reload(self) -> None:
         dotenv_values = _read_dotenv(self.project_dir / ".env")
         self.api_key = os.getenv("GROQ_API_KEY") or dotenv_values.get("GROQ_API_KEY", "")
-        self.model = os.getenv("GROQ_MODEL") or dotenv_values.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
+        configured_model = os.getenv("GROQ_MODEL") or dotenv_values.get("GROQ_MODEL", "")
+        self.interview_model = (
+            os.getenv("GROQ_INTERVIEW_MODEL")
+            or dotenv_values.get("GROQ_INTERVIEW_MODEL", "")
+            or DEFAULT_GROQ_INTERVIEW_MODEL
+        )
+        self.review_model = (
+            os.getenv("GROQ_REVIEW_MODEL")
+            or dotenv_values.get("GROQ_REVIEW_MODEL", "")
+            or configured_model
+            or DEFAULT_GROQ_REVIEW_MODEL
+        )
         self.transcription_model = os.getenv("GROQ_TRANSCRIPTION_MODEL") or dotenv_values.get(
             "GROQ_TRANSCRIPTION_MODEL", DEFAULT_GROQ_TRANSCRIPTION_MODEL
         )
 
     def configuration_status(self) -> str:
         if self.api_key:
-            return f"Groq connected. Interview model: {self.model}. Transcription model: {self.transcription_model}."
+            return (
+                "Groq connected. "
+                f"Interview model: {self.interview_model}. "
+                f"Review model: {self.review_model}. "
+                f"Transcription model: {self.transcription_model}."
+            )
         return "Groq key missing in .env. Interview fallback can still ask prompts, but live speech transcription stays unavailable."
+
+    def _client(self) -> requests.Session:
+        client = getattr(self._thread_local, "client", None)
+        if client is None:
+            client = requests.Session()
+            self._thread_local.client = client
+        return client
 
     def generate_turn(
         self,
@@ -93,14 +119,14 @@ class GroqInterviewService:
             }
         )
 
-        response = requests.post(
+        response = self._client().post(
             GROQ_CHAT_COMPLETIONS_URL,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": self.model,
+                "model": self.interview_model,
                 "messages": messages,
                 "temperature": 0.7,
                 "max_tokens": 180,
@@ -120,7 +146,7 @@ class GroqInterviewService:
         if not self.api_key:
             return ""
 
-        response = requests.post(
+        response = self._client().post(
             GROQ_AUDIO_TRANSCRIPTIONS_URL,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -172,14 +198,14 @@ class GroqInterviewService:
         }
 
         try:
-            response = requests.post(
+            response = self._client().post(
                 GROQ_CHAT_COMPLETIONS_URL,
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": self.model,
+                    "model": self.review_model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": json.dumps(review_prompt, indent=2)},

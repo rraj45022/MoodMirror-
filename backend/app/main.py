@@ -7,7 +7,7 @@ import time
 
 import cv2
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi import File, UploadFile
+from fastapi import File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 import numpy as np
@@ -169,6 +169,18 @@ def _vision_response(detail: SessionDetail, result) -> VisionAnalysisResponse:
             face_box=face_box,
         ),
     )
+
+
+def _analyze_uploaded_frame(frame_bytes: bytes):
+    if not frame_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Frame upload was empty")
+
+    np_frame = np.frombuffer(frame_bytes, dtype=np.uint8)
+    image = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not decode the uploaded frame")
+
+    return face_analyzer.analyze(image)
 
 
 def _start_of_utc_day(timestamp: float | None = None) -> float:
@@ -401,15 +413,7 @@ async def analyze_session_frame(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This session is already completed")
 
     frame_bytes = await frame.read()
-    if not frame_bytes:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Frame upload was empty")
-
-    np_frame = np.frombuffer(frame_bytes, dtype=np.uint8)
-    image = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not decode the uploaded frame")
-
-    result = face_analyzer.analyze(image)
+    result = _analyze_uploaded_frame(frame_bytes)
     updated = _detail_with_cached_messages(detail)
     if result.face_box is not None:
         updated = _detail_with_cached_messages(
@@ -428,6 +432,54 @@ async def analyze_session_frame(
         )
 
     return _vision_response(updated, result)
+
+
+@app.post("/api/sessions/{session_id}/vision/analyze-batch", response_model=VisionAnalysisResponse)
+async def analyze_session_frames_batch(
+    session_id: str,
+    frames: list[UploadFile] = File(...),
+    recorded_at: list[float] = Form(default=[]),
+    user: UserSummary = Depends(get_current_user),
+) -> VisionAnalysisResponse:
+    _require_face_analyzer()
+    try:
+        detail = database.get_session(user.id, session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
+
+    if detail.status != "active":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This session is already completed")
+
+    if not frames:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No frames were uploaded")
+
+    samples: list[EmotionSampleInput] = []
+    latest_result = None
+    for index, frame in enumerate(frames):
+        frame_bytes = await frame.read()
+        result = _analyze_uploaded_frame(frame_bytes)
+        latest_result = result
+        if result.face_box is None:
+            continue
+        sample_recorded_at = recorded_at[index] if index < len(recorded_at) else None
+        samples.append(
+            EmotionSampleInput(
+                emotion=result.emotion,
+                confidence=result.confidence,
+                recorded_at=sample_recorded_at,
+                metrics=result.metrics,
+                scores=result.scores,
+            )
+        )
+
+    if latest_result is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No frames were uploaded")
+
+    updated = _detail_with_cached_messages(detail)
+    if samples:
+        updated = _detail_with_cached_messages(database.add_samples(user.id, session_id, samples))
+
+    return _vision_response(updated, latest_result)
 
 
 @app.post("/api/sessions/{session_id}/interview/review", response_model=InterviewReviewResponse)

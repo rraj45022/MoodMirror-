@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   addSessionMessages,
   addSessionSamples,
+  analyzeSessionFrameBatch,
   analyzeSessionFrame,
   createSession,
   deleteSession,
@@ -86,6 +87,8 @@ function speakInterviewerMessage(message) {
 
 
 function InterviewMediaPanel({ active, endingSession, session, token, onEndInterview, onSessionUpdate, onStatus, onError }) {
+  const FRAME_CAPTURE_INTERVAL_MS = 3000;
+  const MAX_BUFFERED_FRAMES = 12;
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -94,6 +97,8 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
   const frameIntervalRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const bufferedFramesRef = useRef([]);
+  const flushFramesPromiseRef = useRef(null);
   const [mediaState, setMediaState] = useState("idle");
   const [mediaError, setMediaError] = useState("");
   const [micLevel, setMicLevel] = useState(0);
@@ -123,6 +128,8 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
       setInterviewStarted(false);
       setRecording(false);
       setProcessing(false);
+      bufferedFramesRef.current = [];
+      flushFramesPromiseRef.current = null;
       return undefined;
     }
 
@@ -234,6 +241,55 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    bufferedFramesRef.current = [];
+    flushFramesPromiseRef.current = null;
+  }
+
+  async function captureFrameBlob() {
+    if (!videoRef.current || !canvasRef.current || videoRef.current.readyState < 2) {
+      return null;
+    }
+
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 360;
+    const context = canvas.getContext("2d");
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+    if (!blob) {
+      return null;
+    }
+
+    return { blob, recordedAt: Date.now() / 1000 };
+  }
+
+  async function flushBufferedFrames(sessionId) {
+    if (!bufferedFramesRef.current.length) {
+      return;
+    }
+    if (flushFramesPromiseRef.current) {
+      await flushFramesPromiseRef.current;
+      return;
+    }
+
+    const frames = bufferedFramesRef.current;
+    bufferedFramesRef.current = [];
+    const flushPromise = analyzeSessionFrameBatch(token, sessionId, frames)
+      .then((result) => {
+        setAnalysis(result.analysis);
+        onSessionUpdate(result.session);
+      })
+      .catch((error) => {
+        onError(error instanceof Error ? error.message : "Could not sync buffered face analysis.");
+        bufferedFramesRef.current = [...frames, ...bufferedFramesRef.current].slice(-MAX_BUFFERED_FRAMES);
+      })
+      .finally(() => {
+        flushFramesPromiseRef.current = null;
+      });
+
+    flushFramesPromiseRef.current = flushPromise;
+    await flushPromise;
   }
 
   function speakTestPrompt() {
@@ -256,26 +312,26 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
     let busy = false;
 
     async function pushFrame() {
-      if (busy || !videoRef.current || !canvasRef.current || videoRef.current.readyState < 2) {
+      if (busy || flushFramesPromiseRef.current) {
         return;
       }
 
       busy = true;
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 360;
-      const context = canvas.getContext("2d");
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
-
-      if (!blob) {
+      const frame = await captureFrameBlob();
+      if (!frame) {
         busy = false;
         return;
       }
 
       try {
-        const result = await analyzeSessionFrame(token, session.id, blob);
+        if (recording) {
+          bufferedFramesRef.current = [...bufferedFramesRef.current, frame].slice(-MAX_BUFFERED_FRAMES);
+          return;
+        }
+        if (processing) {
+          return;
+        }
+        const result = await analyzeSessionFrame(token, session.id, frame.blob);
         setAnalysis(result.analysis);
         onSessionUpdate(result.session);
       } catch (error) {
@@ -286,14 +342,14 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
     }
 
     pushFrame();
-    frameIntervalRef.current = setInterval(pushFrame, 3000);
+    frameIntervalRef.current = setInterval(pushFrame, FRAME_CAPTURE_INTERVAL_MS);
     return () => {
       if (frameIntervalRef.current) {
         clearInterval(frameIntervalRef.current);
         frameIntervalRef.current = null;
       }
     };
-  }, [active, mediaState, onError, onSessionUpdate, session, token]);
+  }, [active, mediaState, onError, onSessionUpdate, processing, recording, session, token]);
 
   async function handleStartInterview() {
     if (!session || sessionClosed) {
@@ -349,6 +405,7 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
       const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" });
       if (!blob.size) {
         onError("The recording was empty. Try speaking again.");
+        setProcessing(false);
         return;
       }
 
@@ -357,6 +414,7 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
         onSessionUpdate(result.session);
         onStatus(`You said: ${result.transcript}`);
         speakInterviewerMessage(result.assistant_message);
+        void flushBufferedFrames(session.id);
       } catch (error) {
         onError(error instanceof Error ? error.message : "Could not process the recorded answer.");
       } finally {

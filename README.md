@@ -102,7 +102,8 @@ Set these environment variables in Render before the first deploy:
 If you use the interview endpoints, also set:
 
 - `GROQ_API_KEY`
-- `GROQ_MODEL`
+- `GROQ_MODEL` or `GROQ_REVIEW_MODEL` for the heavier review pass
+- `GROQ_INTERVIEW_MODEL` if you want to override the low-latency live interview model
 - `GROQ_TRANSCRIPTION_MODEL`
 
 The hosted backend now uses browser-provided media capture from the React app. Render handles API, persistence, Groq requests, and uploaded frame analysis. `PySide6` remains a desktop-only dependency and is not required by the deployed FastAPI interview routes.

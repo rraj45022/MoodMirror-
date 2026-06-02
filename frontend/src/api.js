@@ -111,6 +111,24 @@ export async function analyzeSessionFrame(token, sessionId, imageBlob) {
   return response.json();
 }
 
+export async function analyzeSessionFrameBatch(token, sessionId, frames) {
+  const formData = new FormData();
+  frames.forEach((frame, index) => {
+    formData.append("frames", frame.blob, `frame-${index}.jpg`);
+    formData.append("recorded_at", String(frame.recordedAt));
+  });
+  const response = await fetch(`${API_URL}/api/sessions/${sessionId}/vision/analyze-batch`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ detail: "Request failed" }));
+    throw new Error(payload.detail || "Request failed");
+  }
+  return response.json();
+}
+
 export function requestInterviewReview(token, sessionId) {
   return request(`/api/sessions/${sessionId}/interview/review`, {
     token,
