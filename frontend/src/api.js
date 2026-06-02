@@ -30,6 +30,10 @@ export function login(body) {
   return request("/api/auth/login", { method: "POST", body });
 }
 
+export function oauthLogin(body) {
+  return request("/api/auth/oauth", { method: "POST", body });
+}
+
 export function fetchDashboard(token) {
   return request("/api/dashboard/summary", { token });
 }

@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, Response
 import numpy as np
 import requests
 
-from .config import DAILY_LLM_CALL_LIMIT, FRONTEND_ORIGIN_REGEX, frontend_origins
+from .config import DAILY_LLM_CALL_LIMIT, FRONTEND_ORIGIN_REGEX, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, frontend_origins
 from .db import database
 from .interview import GroqInterviewService, InterviewMessage
 from .session_cache import active_interview_store
@@ -24,6 +24,7 @@ from .schemas import (
     EmotionSampleInput,
     InterviewReviewResponse,
     InterviewTurnResponse,
+    OAuthLoginRequest,
     RegisterRequest,
     SessionCompleteRequest,
     SessionCreateRequest,
@@ -215,6 +216,38 @@ def _consume_llm_quota(user_id: int, call_types: list[str]) -> None:
     database.record_llm_calls(user_id, call_types)
 
 
+def _supabase_oauth_user(access_token: str) -> dict[str, object]:
+    response = requests.get(
+        f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        },
+        timeout=20,
+    )
+    if response.status_code == status.HTTP_401_UNAUTHORIZED:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="OAuth session is invalid or expired")
+    response.raise_for_status()
+    return response.json()
+
+
+def _oauth_display_name(oauth_user: dict[str, object]) -> str:
+    metadata = oauth_user.get("user_metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    for key in ("full_name", "name", "user_name", "preferred_username"):
+        candidate = metadata.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()[:120]
+
+    email = oauth_user.get("email")
+    if isinstance(email, str) and email.strip():
+        return email.split("@", 1)[0][:120]
+
+    return "Mood Mirror User"
+
+
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
@@ -235,6 +268,22 @@ def login(payload: AuthRequest) -> AuthResponse:
     if result is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     user, token = result
+    return AuthResponse(token=token, user=user)
+
+
+@app.post("/api/auth/oauth", response_model=AuthResponse)
+def oauth_login(payload: OAuthLoginRequest) -> AuthResponse:
+    try:
+        oauth_user = _supabase_oauth_user(payload.access_token)
+    except requests.RequestException as exc:
+        LOGGER.exception("OAuth user lookup failed")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to verify OAuth session") from exc
+
+    email = oauth_user.get("email")
+    if not isinstance(email, str) or not email.strip():
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="OAuth account is missing an email address")
+
+    user, token = database.authenticate_oauth_user(email, _oauth_display_name(oauth_user))
     return AuthResponse(token=token, user=user)
 
 

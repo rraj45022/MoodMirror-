@@ -80,6 +80,52 @@ button {
   border-radius: 28px;
 }
 
+.social-auth-grid {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0 10px;
+}
+
+.oauth-button {
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(21, 18, 28, 0.08);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.oauth-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auth-helper-text {
+  color: var(--muted);
+  line-height: 1.5;
+  margin-bottom: 18px;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(21, 18, 28, 0.12);
+}
+
 .hero-card {
   display: flex;
   justify-content: space-between;
@@ -186,6 +232,166 @@ p {
 
 .wide-panel {
   min-height: 720px;
+}
+
+.progress-panel {
+  margin-bottom: 20px;
+}
+
+.progress-grid {
+  grid-template-columns: minmax(0, 1.8fr) minmax(280px, 0.9fr);
+}
+
+.progress-summary-row {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.trend-badge,
+.progress-card {
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(21, 18, 28, 0.08);
+}
+
+.trend-badge {
+  min-width: 140px;
+  padding: 14px 16px;
+}
+
+.trend-badge strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 1.2rem;
+}
+
+.trend-badge.up strong {
+  color: var(--primary);
+}
+
+.trend-badge.down strong {
+  color: var(--secondary);
+}
+
+.progress-card {
+  padding: 20px;
+}
+
+.progress-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.chart-legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  position: relative;
+  padding-left: 14px;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.legend-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  transform: translateY(-50%);
+}
+
+.legend-score::before {
+  background: var(--secondary);
+}
+
+.legend-calmness::before {
+  background: var(--primary);
+}
+
+.progress-chart {
+  width: 100%;
+  margin-top: 14px;
+}
+
+.chart-grid-line {
+  stroke: rgba(21, 18, 28, 0.12);
+  stroke-width: 1;
+}
+
+.chart-line {
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart-line-score {
+  stroke: var(--secondary);
+}
+
+.chart-line-calmness {
+  stroke: var(--primary);
+}
+
+.chart-point-score {
+  fill: var(--secondary);
+}
+
+.chart-point-calmness {
+  fill: var(--primary);
+}
+
+.chart-label-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(56px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.emotion-breakdown-card,
+.emotion-breakdown-list {
+  display: grid;
+  gap: 14px;
+}
+
+.emotion-breakdown-item {
+  display: grid;
+  gap: 8px;
+}
+
+.emotion-breakdown-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.emotion-breakdown-meta span,
+.emotion-breakdown-item p {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.emotion-breakdown-bar-track {
+  overflow: hidden;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(21, 18, 28, 0.08);
+}
+
+.emotion-breakdown-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--secondary));
 }
 
 .session-summary-card {
@@ -561,6 +767,7 @@ textarea {
   .metrics-grid,
   .detail-grid,
   .content-grid,
+  .progress-grid,
   .wrap-up-grid,
   .session-summary-card,
   .legal-panel {
@@ -576,6 +783,10 @@ textarea {
   }
 
   .summary-pills {
+    justify-content: flex-start;
+  }
+
+  .progress-summary-row {
     justify-content: flex-start;
   }
 }

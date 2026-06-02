@@ -11,11 +11,13 @@ import {
   fetchSession,
   fetchSessions,
   login,
+  oauthLogin,
   requestInterviewReview,
   register,
   respondToInterview,
   startInterview,
 } from "./api";
+import { supabase } from "./supabase";
 
 
 const emotionTemplates = {
@@ -39,6 +41,56 @@ function formatDuration(totalSeconds) {
     return `${minutes}m`;
   }
   return `${minutes}m ${seconds}s`;
+}
+
+function average(values) {
+  if (!values.length) {
+    return 0;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function formatTimelineDate(timestamp) {
+  if (!timestamp) {
+    return "Now";
+  }
+  return new Date(timestamp * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function buildProgressView(sessions) {
+  const completedSessions = [...sessions]
+    .filter((session) => session.status === "completed")
+    .sort((left, right) => (left.completed_at || left.started_at) - (right.completed_at || right.started_at));
+
+  const scoreSessions = completedSessions.filter((session) => typeof session.overall_score === "number");
+  const baselineWindow = scoreSessions.slice(0, Math.min(3, scoreSessions.length));
+  const recentWindow = scoreSessions.slice(-Math.min(3, scoreSessions.length));
+  const calmnessBaseline = completedSessions.slice(0, Math.min(3, completedSessions.length));
+  const calmnessRecent = completedSessions.slice(-Math.min(3, completedSessions.length));
+  const emotionCounts = completedSessions.reduce((counts, session) => {
+    const emotion = session.dominant_emotion || "neutral";
+    return { ...counts, [emotion]: (counts[emotion] || 0) + 1 };
+  }, {});
+
+  return {
+    completedSessions,
+    scoreDelta: scoreSessions.length > 1
+      ? Math.round(average(recentWindow.map((session) => session.overall_score)) - average(baselineWindow.map((session) => session.overall_score)))
+      : null,
+    calmnessDelta: completedSessions.length > 1
+      ? Math.round(average(calmnessRecent.map((session) => session.calmness_percent)) - average(calmnessBaseline.map((session) => session.calmness_percent)))
+      : null,
+    totalPracticeMinutes: Math.round(completedSessions.reduce((sum, session) => sum + session.duration_seconds, 0) / 60),
+    bestScore: scoreSessions.length ? Math.max(...scoreSessions.map((session) => session.overall_score)) : null,
+    emotionBreakdown: Object.entries(emotionCounts)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 5)
+      .map(([emotion, count]) => ({
+        emotion,
+        count,
+        share: completedSessions.length ? Math.round((count / completedSessions.length) * 100) : 0,
+      })),
+  };
 }
 
 function getWrapUp(session) {
@@ -494,6 +546,7 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
 
 
 function App() {
+  const oauthSyncRef = useRef(false);
   const [token, setToken] = useState(() => localStorage.getItem("mood-mirror-token") || "");
   const [user, setUser] = useState(null);
   const [dashboard, setDashboard] = useState(null);
@@ -510,6 +563,7 @@ function App() {
   const [statusMessage, setStatusMessage] = useState("Connect the web client to start storing sessions per user.");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const socialAuthEnabled = Boolean(supabase);
 
   useEffect(() => {
     if (activeView !== "interview") {
@@ -609,6 +663,68 @@ function App() {
     };
   }, [token]);
 
+  useEffect(() => {
+    if (!supabase) {
+      return undefined;
+    }
+
+    async function restoreOAuthSession() {
+      if (token || oauthSyncRef.current) {
+        return;
+      }
+      const { data, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !data.session) {
+        return;
+      }
+      await exchangeOAuthSession(data.session, true);
+    }
+
+    void restoreOAuthSession();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!session || token || oauthSyncRef.current) {
+        return;
+      }
+      if (event === "SIGNED_IN" || event === "INITIAL_SESSION" || event === "TOKEN_REFRESHED") {
+        void exchangeOAuthSession(session, true);
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [token]);
+
+  async function exchangeOAuthSession(session, silent = false) {
+    if (!session?.access_token || oauthSyncRef.current) {
+      return;
+    }
+    oauthSyncRef.current = true;
+    if (!silent) {
+      setLoading(true);
+      setError("");
+    }
+    try {
+      const response = await oauthLogin({
+        access_token: session.access_token,
+        provider: session.user?.app_metadata?.provider || null,
+      });
+      localStorage.setItem("mood-mirror-token", response.token);
+      setToken(response.token);
+      setUser(response.user);
+      setStatusMessage("Authentication complete. User-scoped dashboard loaded.");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      oauthSyncRef.current = false;
+      if (!silent) {
+        setLoading(false);
+      }
+    }
+  }
+
   async function handleAuthSubmit(event) {
     event.preventDefault();
     setLoading(true);
@@ -626,9 +742,37 @@ function App() {
     }
   }
 
+  async function handleSocialAuth(provider) {
+    if (!supabase) {
+      setError("Supabase OAuth is not configured for this frontend.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      const { error: authError } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: {
+          redirectTo: window.location.origin,
+        },
+      });
+      if (authError) {
+        throw authError;
+      }
+    } catch (requestError) {
+      setError(requestError.message);
+      setLoading(false);
+    }
+  }
+
   function clearAuth() {
+    if (supabase) {
+      void supabase.auth.signOut();
+    }
     localStorage.removeItem("mood-mirror-token");
     setToken("");
+    setUser(null);
   }
 
   async function refreshData(activeToken = token) {
@@ -776,6 +920,7 @@ function App() {
 
   const selectedWrapUp = getWrapUp(selectedSession);
   const dashboardWrapUp = getWrapUp(recentWrapUp) || selectedWrapUp;
+  const progressView = buildProgressView(sessions);
   const canEnterInterview = selectedSession && selectedSession.status === "active";
   const heroMessage = activeView === "dashboard"
     ? getDashboardStatus({ dashboard, selectedSession, wrapUp: dashboardWrapUp })
@@ -789,6 +934,20 @@ function App() {
             <p className="eyebrow">Mood Mirror Web</p>
             <h1>Login-first interview analytics.</h1>
             <p className="lede">FastAPI stores user sessions and aggregate metrics. React becomes the delivery surface for webcam, transcript, and review flows.</p>
+            <div className="social-auth-grid">
+              <button className="oauth-button" disabled={loading || !socialAuthEnabled} onClick={() => void handleSocialAuth("google")} type="button">
+                Continue with Google
+              </button>
+              <button className="oauth-button" disabled={loading || !socialAuthEnabled} onClick={() => void handleSocialAuth("github")} type="button">
+                Continue with GitHub
+              </button>
+            </div>
+            <p className="auth-helper-text">
+              {socialAuthEnabled
+                ? "Social sign-in uses Supabase OAuth and then links that identity to your Mood Mirror history."
+                : "Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY to enable Google and GitHub sign-in."}
+            </p>
+            <div className="auth-divider"><span>or continue with email</span></div>
             <div className="toggle-row">
               <button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")} type="button">Login</button>
               <button className={authMode === "register" ? "active" : ""} onClick={() => setAuthMode("register")} type="button">Register</button>
@@ -839,6 +998,25 @@ function App() {
         <MetricCard label="Completed" value={dashboard?.completed_sessions ?? 0} />
         <MetricCard label="Average calmness" value={`${dashboard?.average_calmness ?? 0}%`} />
         <MetricCard label="Calls left today" value={dashboard ? `${dashboard.llm_calls_remaining_today}/${dashboard.daily_llm_call_limit}` : "--"} />
+      </section>
+
+      <section className="panel progress-panel">
+        <div className="workspace-head">
+          <div>
+            <p className="panel-label">Progress view</p>
+            <h2>How your practice is moving</h2>
+          </div>
+          <div className="workspace-actions progress-summary-row">
+            <TrendBadge label="Score trend" value={progressView.scoreDelta} suffix="pts" />
+            <TrendBadge label="Calmness trend" value={progressView.calmnessDelta} suffix="pts" />
+            <TrendBadge label="Practice time" value={progressView.totalPracticeMinutes || null} suffix="min" neutral />
+            <TrendBadge label="Best score" value={progressView.bestScore} suffix="/100" neutral />
+          </div>
+        </div>
+        <div className="grid progress-grid">
+          <ProgressChart sessions={progressView.completedSessions} />
+          <EmotionBreakdown items={progressView.emotionBreakdown} />
+        </div>
       </section>
 
       {activeView === "dashboard" ? (
@@ -1085,6 +1263,123 @@ function MetricCard({ label, value }) {
     <article className="metric-card">
       <p>{label}</p>
       <strong>{value}</strong>
+    </article>
+  );
+}
+
+
+function TrendBadge({ label, value, suffix, neutral = false }) {
+  const hasValue = typeof value === "number";
+  const signedValue = hasValue && !neutral && value > 0 ? `+${value}` : value;
+  return (
+    <article className={`trend-badge ${neutral ? "neutral" : hasValue && value >= 0 ? "up" : "down"}`}>
+      <p>{label}</p>
+      <strong>{hasValue ? `${signedValue}${suffix}` : "--"}</strong>
+    </article>
+  );
+}
+
+
+function ProgressChart({ sessions }) {
+  if (!sessions.length) {
+    return (
+      <div className="progress-card empty-state compact-empty-state">
+        <p>Complete a few interviews and the score and calmness trend will appear here.</p>
+      </div>
+    );
+  }
+
+  const width = 620;
+  const height = 220;
+  const padding = 28;
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const chartSessions = sessions.slice(-8);
+  const step = chartSessions.length > 1 ? innerWidth / (chartSessions.length - 1) : 0;
+  const buildPoint = (session, index, value) => {
+    const x = padding + index * step;
+    const y = padding + innerHeight - (Math.max(0, Math.min(100, value)) / 100) * innerHeight;
+    return `${x},${y}`;
+  };
+  const scorePoints = chartSessions
+    .filter((session) => typeof session.overall_score === "number")
+    .map((session, index) => buildPoint(session, index, session.overall_score));
+  const calmnessPoints = chartSessions.map((session, index) => buildPoint(session, index, session.calmness_percent));
+
+  return (
+    <article className="progress-card progress-chart-card">
+      <div className="progress-card-head">
+        <div>
+          <p className="panel-label">Performance timeline</p>
+          <h3>Score and calmness trend</h3>
+        </div>
+        <div className="chart-legend">
+          <span className="legend-item legend-score">Overall score</span>
+          <span className="legend-item legend-calmness">Calmness</span>
+        </div>
+      </div>
+      <svg className="progress-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Overall score and calmness trend">
+        {[0, 50, 100].map((tick) => {
+          const y = padding + innerHeight - (tick / 100) * innerHeight;
+          return <line className="chart-grid-line" key={tick} x1={padding} x2={width - padding} y1={y} y2={y} />;
+        })}
+        {scorePoints.length > 1 ? <polyline className="chart-line chart-line-score" fill="none" points={scorePoints.join(" ")} /> : null}
+        {calmnessPoints.length > 1 ? <polyline className="chart-line chart-line-calmness" fill="none" points={calmnessPoints.join(" ")} /> : null}
+        {chartSessions.map((session, index) => {
+          const x = padding + index * step;
+          const scoreY = typeof session.overall_score === "number"
+            ? padding + innerHeight - (session.overall_score / 100) * innerHeight
+            : null;
+          const calmnessY = padding + innerHeight - (session.calmness_percent / 100) * innerHeight;
+          return (
+            <g key={session.id}>
+              {scoreY !== null ? <circle className="chart-point chart-point-score" cx={x} cy={scoreY} r="4" /> : null}
+              <circle className="chart-point chart-point-calmness" cx={x} cy={calmnessY} r="4" />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="chart-label-row">
+        {chartSessions.map((session) => (
+          <span key={session.id}>{formatTimelineDate(session.completed_at || session.started_at)}</span>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+
+function EmotionBreakdown({ items }) {
+  if (!items.length) {
+    return (
+      <div className="progress-card empty-state compact-empty-state">
+        <p>As completed sessions build up, this panel will highlight the expression patterns that show up most often.</p>
+      </div>
+    );
+  }
+
+  return (
+    <article className="progress-card emotion-breakdown-card">
+      <div className="progress-card-head">
+        <div>
+          <p className="panel-label">Dominant expression mix</p>
+          <h3>What your history leans toward</h3>
+        </div>
+      </div>
+      <div className="emotion-breakdown-list">
+        {items.map((item) => (
+          <div className="emotion-breakdown-item" key={item.emotion}>
+            <div className="emotion-breakdown-meta">
+              <strong>{item.emotion}</strong>
+              <span>{item.count} sessions</span>
+            </div>
+            <div className="emotion-breakdown-bar-track">
+              <div className="emotion-breakdown-bar-fill" style={{ width: `${item.share}%` }} />
+            </div>
+            <p>{item.share}% of completed interviews</p>
+          </div>
+        ))}
+      </div>
     </article>
   );
 }

@@ -31,6 +31,11 @@ class AuthResponse(BaseModel):
     user: UserSummary
 
 
+class OAuthLoginRequest(BaseModel):
+    access_token: str = Field(min_length=20, max_length=8000)
+    provider: str | None = Field(default=None, max_length=40)
+
+
 class EmotionSampleInput(BaseModel):
     emotion: str = Field(min_length=2, max_length=32)
     confidence: float = Field(ge=0.0, le=1.0)

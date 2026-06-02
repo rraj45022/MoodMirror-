@@ -42,7 +42,7 @@ class AppDatabase:
 
     def create_user(self, email: str, display_name: str, password: str) -> tuple[UserSummary, str]:
         normalized_email = email.strip().lower()
-        existing = self.client.table("users").select("id").eq("email", normalized_email).limit(1).execute().data or []
+        existing = self._users_by_email(normalized_email, "id")
         if existing:
             raise ValueError("Email already registered")
         now = time.time()
@@ -60,13 +60,39 @@ class AppDatabase:
         return self.get_user(user_id), token
 
     def authenticate_user(self, email: str, password: str) -> tuple[UserSummary, str] | None:
-        rows = self.client.table("users").select("id, email, display_name, password_hash, created_at").eq(
-            "email", email.strip().lower()
-        ).limit(1).execute().data or []
+        rows = self._users_by_email(email.strip().lower(), "id, email, display_name, password_hash, created_at")
         if not rows or not verify_password(password, rows[0]["password_hash"]):
             return None
         token = self._issue_token(int(rows[0]["id"]))
         return self._user_from_row(rows[0]), token
+
+    def authenticate_oauth_user(self, email: str, display_name: str) -> tuple[UserSummary, str]:
+        normalized_email = email.strip().lower()
+        normalized_display_name = display_name.strip() or normalized_email.split("@", 1)[0]
+        rows = self._users_by_email(normalized_email, "id, email, display_name, created_at")
+
+        if rows:
+            user_row = rows[0]
+            if normalized_display_name and normalized_display_name != user_row["display_name"]:
+                self.client.table("users").update({"display_name": normalized_display_name}).eq("id", int(user_row["id"])).execute()
+                user_row = {**user_row, "display_name": normalized_display_name}
+            token = self._issue_token(int(user_row["id"]))
+            return self._user_from_row(user_row), token
+
+        now = time.time()
+        created = self.client.table("users").insert(
+            {
+                "email": normalized_email,
+                "display_name": normalized_display_name,
+                "password_hash": hash_password(create_token()),
+                "created_at": now,
+            }
+        ).execute().data or []
+        if not created:
+            raise RuntimeError("Failed to create user")
+        user_id = int(created[0]["id"])
+        token = self._issue_token(user_id)
+        return self.get_user(user_id), token
 
     def get_user(self, user_id: int) -> UserSummary:
         rows = self.client.table("users").select("id, email, display_name, created_at").eq("id", user_id).limit(1).execute().data or []
@@ -228,6 +254,9 @@ class AppDatabase:
             }
         ).execute()
         return token
+
+    def _users_by_email(self, email: str, columns: str) -> list[dict[str, object]]:
+        return self.client.table("users").select(columns).eq("email", email).limit(1).execute().data or []
 
     @staticmethod
     def _start_of_utc_day(timestamp: float | None = None) -> float:

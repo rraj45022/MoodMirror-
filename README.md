@@ -106,6 +106,13 @@ If you use the interview endpoints, also set:
 - `GROQ_INTERVIEW_MODEL` if you want to override the low-latency live interview model
 - `GROQ_TRANSCRIPTION_MODEL`
 
+If you want Google and GitHub login in the React app, also configure Supabase Auth providers and add your frontend URL as an allowed redirect URL. The frontend expects:
+
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_PUBLISHABLE_KEY`
+
+Then enable the Google and GitHub providers in Supabase Auth and point their redirect back to your frontend origin.
+
 The hosted backend now uses browser-provided media capture from the React app. Render handles API, persistence, Groq requests, and uploaded frame analysis. `PySide6` remains a desktop-only dependency and is not required by the deployed FastAPI interview routes.
 
 For a typical Vercel plus Render setup:
