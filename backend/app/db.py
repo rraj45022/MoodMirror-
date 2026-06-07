@@ -15,6 +15,7 @@ from .config import DAILY_LLM_CALL_LIMIT, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_UR
 from .schemas import (
     DashboardSummary,
     EmotionSampleInput,
+    SessionConfigResponse,
     SessionCreateRequest,
     SessionDetail,
     SessionMessageInput,
@@ -110,6 +111,7 @@ class AppDatabase:
     def create_session(self, user_id: int, payload: SessionCreateRequest) -> SessionSummary:
         session_id = str(uuid.uuid4())
         now = time.time()
+        config = payload.config.model_dump() if payload.config is not None else None
         self.client.table("interview_sessions").insert(
             {
                 "id": session_id,
@@ -119,6 +121,7 @@ class AppDatabase:
                 "status": "active",
                 "started_at": now,
                 "completed_at": None,
+                "config_json": config,
                 "review_json": None,
             }
         ).execute()
@@ -147,6 +150,18 @@ class AppDatabase:
         session = self._require_session_row(user_id, session_id)
         self._ensure_active(session)
         self.store_messages(user_id, session_id, messages)
+        return self.get_session(user_id, session_id)
+
+    def update_session_config(self, user_id: int, session_id: str, config_updates: dict[str, object]) -> SessionDetail:
+        session = self._require_session_row(user_id, session_id)
+        self._ensure_active(session)
+        existing_config = session.get("config_json") or {}
+        if isinstance(existing_config, str):
+            existing_config = json.loads(existing_config)
+        if not isinstance(existing_config, dict):
+            existing_config = {}
+        next_config = {**existing_config, **config_updates}
+        self.client.table("interview_sessions").update({"config_json": next_config}).eq("id", session_id).eq("user_id", user_id).execute()
         return self.get_session(user_id, session_id)
 
     def store_messages(self, user_id: int, session_id: str, messages: list[SessionMessageInput | SessionMessageResponse]) -> None:
@@ -311,6 +326,21 @@ class AppDatabase:
             return SessionReviewResponse(**json.loads(review_json))
         return SessionReviewResponse(**review_json)
 
+    @staticmethod
+    def _get_config(config_json: dict[str, object] | str | None) -> SessionConfigResponse:
+        if not config_json:
+            return SessionConfigResponse()
+        payload = json.loads(config_json) if isinstance(config_json, str) else config_json
+        if not isinstance(payload, dict):
+            return SessionConfigResponse()
+        resume_text = payload.get("resume_text")
+        return SessionConfigResponse(
+            difficulty=payload.get("difficulty"),
+            resume_filename=payload.get("resume_filename"),
+            has_resume=isinstance(resume_text, str) and bool(resume_text.strip()),
+            resume_text=resume_text if isinstance(resume_text, str) else None,
+        )
+
     def _session_summary_from_row(
         self,
         user_id: int,
@@ -322,6 +352,7 @@ class AppDatabase:
         samples = self._get_samples(row["id"])
         resolved_messages = messages if messages is not None else self._get_messages(row["id"])
         resolved_review = review if review is not None else self._get_review(row["review_json"])
+        resolved_config = self._get_config(row.get("config_json"))
         aggregate = SessionAnalytics.summarize(
             started_at=float(row["started_at"]),
             completed_at=float(row["completed_at"]) if row["completed_at"] is not None else None,
@@ -349,6 +380,7 @@ class AppDatabase:
             transcript_turns=aggregate.transcript_turns,
             latest_expression=aggregate.latest_expression,
             overall_score=aggregate.overall_score,
+            config=resolved_config,
         )
 
     @staticmethod

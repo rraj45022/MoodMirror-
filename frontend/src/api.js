@@ -46,6 +46,21 @@ export function createSession(token, body) {
   return request("/api/sessions", { token, method: "POST", body });
 }
 
+export async function uploadSessionResume(token, sessionId, resumeFile) {
+  const formData = new FormData();
+  formData.append("resume", resumeFile, resumeFile.name || "resume.pdf");
+  const response = await fetch(`${API_URL}/api/sessions/${sessionId}/resume`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ detail: "Request failed" }));
+    throw new Error(payload.detail || "Request failed");
+  }
+  return response.json();
+}
+
 export function fetchSession(token, sessionId) {
   return request(`/api/sessions/${sessionId}`, { token });
 }

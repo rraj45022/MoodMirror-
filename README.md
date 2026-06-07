@@ -62,6 +62,7 @@ The new backend exposes these main routes:
 - `GET /api/sessions`
 - `POST /api/sessions`
 - `GET /api/sessions/{session_id}`
+- `POST /api/sessions/{session_id}/resume`
 - `POST /api/sessions/{session_id}/messages`
 - `POST /api/sessions/{session_id}/samples`
 - `POST /api/sessions/{session_id}/complete`
@@ -112,6 +113,8 @@ If you want Google and GitHub login in the React app, also configure Supabase Au
 - `VITE_SUPABASE_PUBLISHABLE_KEY`
 
 Then enable the Google and GitHub providers in Supabase Auth and point their redirect back to your frontend origin.
+
+If you pull the newer revision-session feature, rerun [backend/supabase/schema.sql](backend/supabase/schema.sql) so Supabase has the added `revision` mode and the `config_json` column used for difficulty and resume metadata.
 
 The hosted backend now uses browser-provided media capture from the React app. Render handles API, persistence, Groq requests, and uploaded frame analysis. `PySide6` remains a desktop-only dependency and is not required by the deployed FastAPI interview routes.
 
@@ -200,6 +203,15 @@ Interview Mode focuses on session-style behavioral signals rather than pure them
 - Automatic transcript and macOS voice playback for interviewer prompts via the built-in `say` command
 
 This mode is meant for mock interviews, presentation practice, and self-review demos.
+
+### Revision Mode
+
+Revision Mode is a resume-driven brush-up flow.
+
+- Upload a PDF or text resume into the session
+- Choose `easy`, `medium`, or `hard` difficulty
+- Get one resume-grounded question at a time based on the uploaded experience
+- Reuse the same live camera, microphone, transcript, and review flow as interview mode
 
 ### Streamer Mode
 

@@ -138,6 +138,69 @@ class GroqInterviewService:
         content = data["choices"][0]["message"]["content"].strip()
         return " ".join(content.split())
 
+    def generate_revision_turn(
+        self,
+        conversation: list[InterviewMessage],
+        expression_summary: str,
+        difficulty: str,
+        resume_text: str,
+        stage: str,
+    ) -> str:
+        self.reload()
+        if not self.api_key:
+            return self._fallback_revision_question(conversation, difficulty, resume_text)
+
+        difficulty_prompt = {
+            "easy": "Ask an accessible resume-based revision question that checks fundamentals and confidence.",
+            "medium": "Ask a resume-based question that tests practical understanding, tradeoffs, and concrete examples.",
+            "hard": "Ask a demanding resume-based question that probes depth, edge cases, architecture, or technical tradeoffs.",
+        }.get(difficulty, "Ask a resume-based revision question.")
+
+        system_prompt = (
+            "You are a focused interview revision coach. "
+            "Ask exactly one concise question at a time based on the candidate's resume. "
+            "Use the resume as the primary source of topics and technologies. "
+            "Do not invent achievements that are not grounded in the resume or conversation. "
+            "Keep each question concise, usually under 70 words. "
+            "Do not answer on behalf of the candidate."
+        )
+
+        messages = [{"role": "system", "content": system_prompt}]
+        for item in conversation[-12:]:
+            if item.role in {"user", "assistant"}:
+                messages.append({"role": item.role, "content": item.content})
+
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"Difficulty: {difficulty}\n"
+                    f"Resume:\n{resume_text[:12000]}\n\n"
+                    f"Recent expression summary: {expression_summary}\n"
+                    f"Instruction: {difficulty_prompt}"
+                ),
+            }
+        )
+
+        response = self._client().post(
+            GROQ_CHAT_COMPLETIONS_URL,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.interview_model,
+                "messages": messages,
+                "temperature": 0.5,
+                "max_tokens": 180,
+            },
+            timeout=25,
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        return " ".join(content.split())
+
     def transcribe_audio(self, wav_bytes: bytes) -> str:
         return self.transcribe_audio_file(wav_bytes, "interview-response.wav", "audio/wav")
 
@@ -243,6 +306,26 @@ class GroqInterviewService:
             f"You mentioned: {latest_user_reply[:120]}. What is the strongest technical detail or example "
             "you would add next to make that answer more convincing?"
         )
+
+    def _fallback_revision_question(self, conversation: list[InterviewMessage], difficulty: str, resume_text: str) -> str:
+        keywords = re.findall(r"[A-Za-z][A-Za-z0-9+#.-]{2,}", resume_text)
+        unique_keywords: list[str] = []
+        for keyword in keywords:
+            normalized = keyword.lower()
+            if normalized in {item.lower() for item in unique_keywords}:
+                continue
+            unique_keywords.append(keyword)
+            if len(unique_keywords) == 3:
+                break
+
+        topic_summary = ", ".join(unique_keywords) if unique_keywords else "your recent experience"
+        if difficulty == "easy":
+            return f"Based on your resume, can you walk me through one project where you used {topic_summary}?"
+        if difficulty == "hard":
+            return f"Your resume points to {topic_summary}. What is the hardest tradeoff or failure you handled there, and how would you defend that decision now?"
+        if conversation:
+            return f"Staying with {topic_summary}, what technical detail would make your last answer stronger and more concrete?"
+        return f"Based on your resume, tell me about a hands-on project where you applied {topic_summary} and what your direct contribution was."
 
     def _parse_review_response(
         self,

@@ -21,13 +21,20 @@ create index if not exists auth_tokens_expires_at_idx on public.auth_tokens(expi
 create table if not exists public.interview_sessions (
     id uuid primary key,
     user_id bigint not null references public.users(id) on delete cascade,
-    mode text not null check (mode in ('mirror', 'interview', 'streamer')),
+    mode text not null check (mode in ('mirror', 'interview', 'revision', 'streamer')),
     title text not null,
     status text not null check (status in ('active', 'completed')),
     started_at double precision not null,
     completed_at double precision,
+    config_json jsonb,
     review_json jsonb
 );
+
+alter table public.interview_sessions add column if not exists config_json jsonb;
+alter table public.interview_sessions drop constraint if exists interview_sessions_mode_check;
+alter table public.interview_sessions
+    add constraint interview_sessions_mode_check
+    check (mode in ('mirror', 'interview', 'revision', 'streamer'));
 
 create index if not exists interview_sessions_user_id_idx on public.interview_sessions(user_id);
 create index if not exists interview_sessions_started_at_idx on public.interview_sessions(started_at desc);

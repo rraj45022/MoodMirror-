@@ -16,6 +16,7 @@ import {
   register,
   respondToInterview,
   startInterview,
+  uploadSessionResume,
 } from "./api";
 import { supabase } from "./supabase";
 
@@ -138,6 +139,11 @@ function speakInterviewerMessage(message) {
 }
 
 
+function isLiveSession(session) {
+  return session && ["interview", "revision"].includes(session.mode);
+}
+
+
 function InterviewMediaPanel({ active, endingSession, session, token, onEndInterview, onSessionUpdate, onStatus, onError }) {
   const FRAME_CAPTURE_INTERVAL_MS = 3000;
   const MAX_BUFFERED_FRAMES = 12;
@@ -159,16 +165,24 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
   const [recording, setRecording] = useState(false);
   const [processing, setProcessing] = useState(false);
   const sessionClosed = !session || session.status !== "active";
+  const hasAssistantTurn = Boolean(session?.messages?.some((message) => message.role === "assistant"));
+  const liveSessionStarted = !sessionClosed && (interviewStarted || hasAssistantTurn);
 
   useEffect(() => {
-    if (!session || session.mode !== "interview") {
+    if (!isLiveSession(session)) {
       setInterviewStarted(false);
       return;
     }
 
-    const hasAssistantTurn = session.messages.some((message) => message.role === "assistant");
-    setInterviewStarted(hasAssistantTurn && session.status === "active");
-  }, [session]);
+    if (session.status !== "active") {
+      setInterviewStarted(false);
+      return;
+    }
+
+    if (hasAssistantTurn) {
+      setInterviewStarted(true);
+    }
+  }, [hasAssistantTurn, session]);
 
   useEffect(() => {
     if (!active) {
@@ -353,7 +367,7 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
   }
 
   useEffect(() => {
-    if (!active || mediaState !== "ready" || !session || session.mode !== "interview") {
+    if (!active || mediaState !== "ready" || !isLiveSession(session)) {
       if (frameIntervalRef.current) {
         clearInterval(frameIntervalRef.current);
         frameIntervalRef.current = null;
@@ -405,6 +419,10 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
 
   async function handleStartInterview() {
     if (!session || sessionClosed) {
+      return;
+    }
+    if (mediaState !== "ready") {
+      onError("Camera and microphone are not ready yet.");
       return;
     }
     setProcessing(true);
@@ -517,23 +535,23 @@ function InterviewMediaPanel({ active, endingSession, session, token, onEndInter
         <div className="media-actions">
           <div className="toggle-row interview-toggle" role="group" aria-label="Interview controls">
             <button
-              className={interviewStarted ? "" : "active"}
-              disabled={processing || endingSession || interviewStarted || sessionClosed}
+              className={liveSessionStarted ? "" : "active"}
+              disabled={processing || endingSession || liveSessionStarted || sessionClosed || mediaState !== "ready"}
               onClick={handleStartInterview}
               type="button"
             >
-              {processing && !interviewStarted ? "Starting..." : "Start interview"}
+              {mediaState !== "ready" ? "Waiting for media..." : processing && !liveSessionStarted ? "Starting..." : liveSessionStarted ? "Interview started" : "Start interview"}
             </button>
             <button
-              className={interviewStarted && !sessionClosed ? "active" : ""}
-              disabled={processing || endingSession || !interviewStarted || sessionClosed}
+              className={liveSessionStarted && !sessionClosed ? "active" : ""}
+              disabled={processing || endingSession || !liveSessionStarted || sessionClosed}
               onClick={() => void onEndInterview()}
               type="button"
             >
               {endingSession ? "Ending..." : "End interview"}
             </button>
           </div>
-          <button className="ghost" disabled={processing || mediaState !== "ready" || !interviewStarted || sessionClosed} onClick={handleRecordAnswer} type="button">
+          <button className="ghost" disabled={processing || mediaState !== "ready" || !liveSessionStarted || sessionClosed} onClick={handleRecordAnswer} type="button">
             {processing ? "Processing..." : recording ? "Stop recording" : "Record answer"}
           </button>
           <button className="ghost" onClick={speakTestPrompt} type="button">Test interviewer voice</button>
@@ -557,7 +575,8 @@ function App() {
   const [recentWrapUp, setRecentWrapUp] = useState(null);
   const [authMode, setAuthMode] = useState("login");
   const [authForm, setAuthForm] = useState({ email: "", password: "", display_name: "" });
-  const [sessionForm, setSessionForm] = useState({ title: "Frontend practice round", mode: "interview" });
+  const [sessionForm, setSessionForm] = useState({ title: "Frontend practice round", mode: "interview", config: { difficulty: "medium" } });
+  const [resumeFile, setResumeFile] = useState(null);
   const [messageDraft, setMessageDraft] = useState("I recently led a migration that reduced API latency by 28%.");
   const [messageRole, setMessageRole] = useState("user");
   const [statusMessage, setStatusMessage] = useState("Connect the web client to start storing sessions per user.");
@@ -573,7 +592,7 @@ function App() {
   }, [activeView, selectedSession]);
 
   function setInterviewStateFromSession(session) {
-    if (!session || session.mode !== "interview") {
+    if (!isLiveSession(session)) {
       return;
     }
     const latestAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
@@ -608,6 +627,7 @@ function App() {
         transcript_turns: detail.transcript_turns,
         latest_expression: detail.latest_expression,
         overall_score: detail.overall_score,
+        config: detail.config,
       };
       const existingIndex = currentSessions.findIndex((session) => session.id === detail.id);
       if (existingIndex === -1) {
@@ -637,12 +657,12 @@ function App() {
         if (!active) {
           return;
         }
-        const interviewSessions = sessionsResponse.filter((session) => session.mode === "interview");
+        const practiceSessions = sessionsResponse.filter((session) => ["interview", "revision"].includes(session.mode));
         setDashboard(dashboardResponse);
-        setSessions(interviewSessions);
+        setSessions(practiceSessions);
         setUser(dashboardResponse.user);
-        if (interviewSessions.length && !selectedSession) {
-          void selectSession(interviewSessions[0].id, token);
+        if (practiceSessions.length && !selectedSession) {
+          void selectSession(practiceSessions[0].id, token);
         }
       })
       .catch((requestError) => {
@@ -780,7 +800,7 @@ function App() {
       fetchDashboard(activeToken),
       fetchSessions(activeToken),
     ]);
-    const interviewSessions = sessionsResponse.filter((session) => session.mode === "interview");
+    const interviewSessions = sessionsResponse.filter((session) => ["interview", "revision"].includes(session.mode));
     setDashboard(dashboardResponse);
     setSessions(interviewSessions);
     setUser(dashboardResponse.user);
@@ -795,15 +815,30 @@ function App() {
 
   async function handleCreateSession(event) {
     event.preventDefault();
+    if (sessionForm.mode === "revision" && !resumeFile) {
+      setError("Upload a resume file before creating a revision session.");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
-      const created = await createSession(token, { ...sessionForm, mode: "interview" });
-      const detail = await selectSession(created.id);
+      const created = await createSession(token, {
+        title: sessionForm.title,
+        mode: sessionForm.mode,
+        config: sessionForm.mode === "revision" ? { difficulty: sessionForm.config.difficulty } : null,
+      });
+      const detail = sessionForm.mode === "revision" && resumeFile
+        ? await uploadSessionResume(token, created.id, resumeFile)
+        : await selectSession(created.id);
       syncSessionDetail(detail);
       await refreshData();
       setActiveView("dashboard");
-      setStatusMessage(`Interview session ready for ${created.title}. Open the interview room when you want to start.`);
+      setResumeFile(null);
+      setStatusMessage(
+        sessionForm.mode === "revision"
+          ? `Revision session ready for ${created.title}. Open the live room when you want resume-based brush-up questions.`
+          : `Interview session ready for ${created.title}. Open the interview room when you want to start.`
+      );
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -881,14 +916,15 @@ function App() {
       return;
     }
 
+    const previousView = activeView;
     setLoading(true);
     setError("");
+    setActiveView("dashboard");
+    setSelectedSession(null);
     try {
       await deleteSession(token, sessionToDelete.id);
       const { sessions: remainingSessions } = await refreshData();
       const nextSession = remainingSessions.find((session) => session.id !== sessionToDelete.id) || null;
-
-      setActiveView("dashboard");
 
       if (nextSession) {
         await selectSession(nextSession.id);
@@ -904,18 +940,37 @@ function App() {
       }
       setStatusMessage(`Deleted session data for ${sessionToDelete.title}.`);
     } catch (requestError) {
+      setActiveView(previousView);
+      setSelectedSession(sessionToDelete);
       setError(requestError.message);
     } finally {
       setLoading(false);
     }
   }
 
-  function handleEnterInterview() {
+  async function handleEnterInterview() {
     if (!selectedSession) {
       return;
     }
+    setLoading(true);
+    setError("");
+    try {
+      const detail = await selectSession(selectedSession.id);
+      syncSessionDetail(detail);
+    } catch (requestError) {
+      setError(requestError.message);
+      setLoading(false);
+      return;
+    }
     setActiveView("interview");
-    setStatusMessage(selectedSession.status === "completed" ? "Review is ready below. Start a fresh session to practice again." : "Interview room ready. Camera will connect when this screen opens.");
+    setStatusMessage(
+      selectedSession.status === "completed"
+        ? "Review is ready below. Start a fresh session to practice again."
+        : selectedSession.mode === "revision"
+          ? "Revision room ready. Your resume-driven brush-up session will start when this screen opens."
+          : "Interview room ready. Camera will connect when this screen opens."
+    );
+    setLoading(false);
   }
 
   const selectedWrapUp = getWrapUp(selectedSession);
@@ -1029,12 +1084,42 @@ function App() {
                   Session title
                   <input value={sessionForm.title} onChange={(event) => setSessionForm({ ...sessionForm, title: event.target.value })} required />
                 </label>
-                <button className="primary" disabled={loading} type="submit">{loading ? "Creating..." : "Create interview session"}</button>
+                <label>
+                  Session type
+                  <select value={sessionForm.mode} onChange={(event) => setSessionForm({ ...sessionForm, mode: event.target.value })}>
+                    <option value="interview">Mock interview</option>
+                    <option value="revision">Revision / brush-up</option>
+                  </select>
+                </label>
+                {sessionForm.mode === "revision" ? (
+                  <>
+                    <label>
+                      Difficulty
+                      <select
+                        value={sessionForm.config.difficulty}
+                        onChange={(event) => setSessionForm({
+                          ...sessionForm,
+                          config: { ...sessionForm.config, difficulty: event.target.value },
+                        })}
+                      >
+                        <option value="easy">Easy</option>
+                        <option value="medium">Medium</option>
+                        <option value="hard">Hard</option>
+                      </select>
+                    </label>
+                    <label>
+                      Resume upload
+                      <input accept=".pdf,.txt,.md,.rtf,text/plain,application/pdf" onChange={(event) => setResumeFile(event.target.files?.[0] || null)} type="file" />
+                    </label>
+                    <p className="media-note">Upload a PDF or text resume. The revision coach will ask questions from that resume at the selected difficulty.</p>
+                  </>
+                ) : null}
+                <button className="primary" disabled={loading} type="submit">{loading ? "Creating..." : sessionForm.mode === "revision" ? "Create revision session" : "Create interview session"}</button>
               </form>
             </div>
 
             <div>
-              <p className="panel-label">Interview sessions</p>
+              <p className="panel-label">Practice sessions</p>
               <div className="session-list">
                 {sessions.map((session) => (
                   <button
@@ -1044,7 +1129,7 @@ function App() {
                     type="button"
                   >
                     <strong>{session.title}</strong>
-                    <span>{session.status} · {formatDuration(session.duration_seconds)}</span>
+                    <span>{session.mode} · {session.status} · {formatDuration(session.duration_seconds)}</span>
                     <span>{session.overall_score ? `${session.overall_score}/100 overall` : session.latest_expression}</span>
                   </button>
                 ))}
@@ -1065,7 +1150,7 @@ function App() {
                   </button>
                 ) : null}
                 {canEnterInterview ? (
-                  <button className="primary" onClick={handleEnterInterview} type="button">Go to interview session</button>
+                  <button className="primary" onClick={() => void handleEnterInterview()} type="button">Go to live session</button>
                 ) : null}
               </div>
             </div>
@@ -1079,10 +1164,15 @@ function App() {
                     <p className="lede">
                       {selectedSession.status === "completed"
                         ? "Review the wrap-up below or create a new session for another round."
-                        : "Camera and microphone stay off on this page. Open the interview room when you want to begin live capture."}
+                        : selectedSession.mode === "revision"
+                          ? "Upload stays tied to this session. Open the live room when you want resume-driven revision questions."
+                          : "Camera and microphone stay off on this page. Open the interview room when you want to begin live capture."}
                     </p>
                   </div>
                   <div className="summary-pills">
+                    <span>{selectedSession.mode}</span>
+                    {selectedSession.config?.difficulty ? <span>{selectedSession.config.difficulty} difficulty</span> : null}
+                    {selectedSession.config?.has_resume ? <span>{selectedSession.config.resume_filename || "resume uploaded"}</span> : null}
                     <span>{selectedSession.transcript_turns} transcript turns</span>
                     <span>{selectedSession.total_samples} expression samples</span>
                     <span>{selectedSession.dominant_emotion} dominant mood</span>
@@ -1165,6 +1255,20 @@ function App() {
                 <MetricCard label="Surprises" value={selectedSession.surprise_events} />
                 <MetricCard label="Turns" value={selectedSession.transcript_turns} />
               </div>
+
+              {selectedSession.mode === "revision" ? (
+                <div className="session-summary-card">
+                  <div>
+                    <p className="panel-label">Revision brief</p>
+                    <h3>{selectedSession.config?.difficulty || "medium"} difficulty resume round</h3>
+                    <p className="lede">
+                      {selectedSession.config?.has_resume
+                        ? `Resume source: ${selectedSession.config.resume_filename || "uploaded resume"}. Questions will stay grounded in the uploaded experience.`
+                        : "Upload a resume to begin a revision session."}
+                    </p>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="stack gap-md">
                 <p className="panel-label">Quick emotion capture</p>

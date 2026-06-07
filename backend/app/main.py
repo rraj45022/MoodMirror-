@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+from io import BytesIO
 import logging
 from pathlib import Path
 import time
@@ -11,6 +12,8 @@ from fastapi import File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 import numpy as np
+from postgrest.exceptions import APIError
+from pypdf import PdfReader
 import requests
 
 from .config import DAILY_LLM_CALL_LIMIT, FRONTEND_ORIGIN_REGEX, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, frontend_origins
@@ -90,8 +93,8 @@ def get_current_user(authorization: str | None = Header(default=None)) -> UserSu
 
 
 def _ensure_interview_session(detail: SessionDetail) -> None:
-    if detail.mode != "interview":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This action is only available for interview sessions")
+    if detail.mode not in {"interview", "revision"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This action is only available for live interview sessions")
     if detail.status != "active":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This session is already completed")
 
@@ -110,8 +113,37 @@ def _conversation(detail: SessionDetail) -> list[InterviewMessage]:
     return [InterviewMessage(role=message.role, content=message.content) for message in detail.messages if message.role in {"user", "assistant"}]
 
 
-def _opening_interview_prompt() -> str:
-    return "Let’s start your mock interview. Tell me about yourself and the technical work you have been doing most recently."
+def _opening_interview_prompt(session_title: str) -> str:
+    return (
+        f"Welcome to {session_title}. Let’s start your mock interview. "
+        "Tell me about yourself and the technical work you have been doing most recently."
+    )
+
+
+def _opening_revision_prompt(session_title: str, difficulty: str) -> str:
+    return (
+        f"Welcome to {session_title}. We are starting a {difficulty} revision round based on your resume. "
+        "I will ask one focused question at a time, so answer as if you are brushing up before an interview."
+    )
+
+
+def _resume_text(detail: SessionDetail) -> str:
+    return detail.config.resume_text or ""
+
+
+def _resume_difficulty(detail: SessionDetail) -> str:
+    return detail.config.difficulty or "medium"
+
+
+def _extract_resume_text(filename: str, content_type: str, file_bytes: bytes) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".txt", ".md", ".rtf"} or content_type.startswith("text/"):
+        return file_bytes.decode("utf-8", errors="ignore").strip()
+    if suffix == ".pdf" or content_type == "application/pdf":
+        reader = PdfReader(BytesIO(file_bytes))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(pages).strip()
+    raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Resume upload supports PDF and text files only")
 
 
 def _require_interview_service() -> None:
@@ -308,7 +340,50 @@ def list_sessions(user: UserSummary = Depends(get_current_user)) -> list[Session
 
 @app.post("/api/sessions", response_model=SessionSummary, status_code=status.HTTP_201_CREATED)
 def create_session(payload: SessionCreateRequest, user: UserSummary = Depends(get_current_user)) -> SessionSummary:
-    return database.create_session(user.id, payload)
+    try:
+        return database.create_session(user.id, payload)
+    except APIError as exc:
+        message = str(exc)
+        if "interview_sessions_mode_check" in message:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Database schema is outdated for the selected session mode. Re-run backend/supabase/schema.sql in Supabase and try again.",
+            ) from exc
+        raise
+
+
+@app.post("/api/sessions/{session_id}/resume", response_model=SessionDetail)
+async def upload_session_resume(
+    session_id: str,
+    resume: UploadFile = File(...),
+    user: UserSummary = Depends(get_current_user),
+) -> SessionDetail:
+    try:
+        detail = database.get_session(user.id, session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
+
+    if detail.mode != "revision":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Resume upload is only available for revision sessions")
+    if detail.status != "active":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This session is already completed")
+
+    file_bytes = await resume.read()
+    if not file_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Resume upload was empty")
+
+    resume_text = _extract_resume_text(resume.filename or "resume.txt", resume.content_type or "text/plain", file_bytes)
+    if len(resume_text) < 80:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Could not extract enough resume text from the uploaded file")
+
+    return database.update_session_config(
+        user.id,
+        session_id,
+        {
+            "resume_text": resume_text[:40000],
+            "resume_filename": resume.filename or "resume.txt",
+        },
+    )
 
 
 @app.get("/api/sessions/{session_id}", response_model=SessionDetail)
@@ -383,7 +458,12 @@ def start_interview(session_id: str, user: UserSummary = Depends(get_current_use
 
     _ensure_interview_session(detail)
     detail = _detail_with_cached_messages(detail)
-    assistant_message = _opening_interview_prompt()
+    if detail.mode == "revision":
+        if not _resume_text(detail).strip():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upload a resume before starting a revision session")
+        assistant_message = _opening_revision_prompt(detail.title, _resume_difficulty(detail))
+    else:
+        assistant_message = _opening_interview_prompt(detail.title)
 
     updated_messages = active_interview_store.append_messages(
         session_id,
@@ -433,7 +513,18 @@ async def respond_to_interview(
     )
 
     try:
-        assistant_message = interview_service.generate_turn(_conversation(detail), _expression_summary(detail), "reply")
+        if detail.mode == "revision":
+            if not _resume_text(detail).strip():
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upload a resume before continuing a revision session")
+            assistant_message = interview_service.generate_revision_turn(
+                _conversation(detail),
+                _expression_summary(detail),
+                _resume_difficulty(detail),
+                _resume_text(detail),
+                "reply",
+            )
+        else:
+            assistant_message = interview_service.generate_turn(_conversation(detail), _expression_summary(detail), "reply")
     except requests.RequestException as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to generate the follow-up interview question") from exc
 

@@ -5,9 +5,10 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-SessionMode = Literal["mirror", "interview", "streamer"]
+SessionMode = Literal["mirror", "interview", "revision", "streamer"]
 SessionStatus = Literal["active", "completed"]
 MessageRole = Literal["system", "assistant", "user"]
+RevisionDifficulty = Literal["easy", "medium", "hard"]
 
 
 class UserSummary(BaseModel):
@@ -61,9 +62,23 @@ class SessionReviewInput(BaseModel):
     expression_feedback: list[str] = Field(default_factory=list)
 
 
+class SessionConfigInput(BaseModel):
+    difficulty: RevisionDifficulty | None = None
+    resume_text: str | None = Field(default=None, max_length=40000)
+    resume_filename: str | None = Field(default=None, max_length=255)
+
+
+class SessionConfigResponse(BaseModel):
+    difficulty: RevisionDifficulty | None = None
+    resume_filename: str | None = None
+    has_resume: bool = False
+    resume_text: str | None = None
+
+
 class SessionCreateRequest(BaseModel):
     mode: SessionMode = "interview"
     title: str = Field(min_length=2, max_length=160)
+    config: SessionConfigInput | None = None
 
 
 class SessionSamplesRequest(BaseModel):
@@ -109,6 +124,7 @@ class SessionSummary(BaseModel):
     transcript_turns: int = 0
     latest_expression: str = "No samples yet"
     overall_score: int | None = None
+    config: SessionConfigResponse = Field(default_factory=SessionConfigResponse)
 
 
 class SessionDetail(SessionSummary):
